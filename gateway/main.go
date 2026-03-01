@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -226,6 +225,21 @@ func main() {
 	}
 
 	r := gin.Default()
+
+	// Restrict trusted proxies to prevent X-Forwarded-For spoofing.
+	// IP-based rate limiting relies on c.ClientIP(), which reads
+	// X-Forwarded-For only from proxies in this list. An empty list
+	// means only the direct remote address is trusted.
+	// Set TRUSTED_PROXIES env var (comma-separated CIDRs) for production.
+	if trustedProxies := getTrustedProxies(); len(trustedProxies) > 0 {
+		if err := r.SetTrustedProxies(trustedProxies); err != nil {
+			_ = r.SetTrustedProxies(nil)
+			log.Printf("[WARN] invalid TRUSTED_PROXIES value, falling back to no trusted proxies: %v", err)
+		}
+	} else {
+		// Trust no proxies: always use direct RemoteAddr for ClientIP.
+		_ = r.SetTrustedProxies(nil)
+	}
 
 	// VIBE FIX: Register the Correlation ID Middleware immediately
 	// This ensures every single request gets an ID before anything else happens.
@@ -671,19 +685,12 @@ func RateLimitMiddleware(limiters map[string]RateLimiter) gin.HandlerFunc {
 	}
 }
 
-// getRateLimitKey determines the key for rate limiting (nonce/wallet > IP)
+// getRateLimitKey determines the key for rate limiting (always uses IP)
 func getRateLimitKey(c *gin.Context) string {
-	signature := c.GetHeader("X-402-Signature")
-	nonce := c.GetHeader("X-402-Nonce")
-
-	// Only use nonce-based key if BOTH signature and nonce are present
-	// This prevents attackers from bypassing IP rate limits with fake nonces
-	if signature != "" && nonce != "" {
-		hash := sha256.Sum256([]byte(nonce))
-		// Use 32 hex chars (128 bits) for better collision resistance
-		return "nonce:" + hex.EncodeToString(hash[:])[:32]
-	}
-
+	// REMOVED: Nonce-based keying
+	// Nonces must be unique per request (replay attack prevention),
+	// which creates infinite buckets and memory leaks.
+	// ALWAYS use IP for now to prevent infinite-bucket attacks
 	return "ip:" + c.ClientIP()
 }
 
@@ -732,6 +739,24 @@ func getLimitForTier(tier string) int {
 func getRateLimitEnabled() bool {
 	enabled := strings.ToLower(os.Getenv("RATE_LIMIT_ENABLED"))
 	return enabled == "true" || enabled == "1"
+}
+
+// getTrustedProxies returns the list of trusted proxy CIDRs/IPs from the
+// TRUSTED_PROXIES environment variable (comma-separated). Returns nil when
+// the variable is unset so the caller can disable proxy trust entirely.
+func getTrustedProxies() []string {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	trusted := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			trusted = append(trusted, trimmed)
+		}
+	}
+	return trusted
 }
 
 // getEnvAsInt retrieves an environment variable as an integer with a default value

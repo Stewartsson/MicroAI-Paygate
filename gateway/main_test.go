@@ -155,7 +155,7 @@ func TestRateLimitMiddleware_StandardUser(t *testing.T) {
 }
 
 func TestRateLimitMiddleware_DifferentKeys(t *testing.T) {
-	// Verify that different users have separate rate limit buckets
+	// Verify that different IPs have separate rate limit buckets
 	os.Setenv("RATE_LIMIT_ENABLED", "true")
 	os.Setenv("RATE_LIMIT_STANDARD_RPM", "60")
 	os.Setenv("RATE_LIMIT_STANDARD_BURST", "2")
@@ -178,7 +178,8 @@ func TestRateLimitMiddleware_DifferentKeys(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		req, _ := http.NewRequest("GET", "/test", nil)
 		req.Header.Set("X-402-Signature", "sig1")
-		req.Header.Set("X-402-Nonce", "user1-11111111") // Different first 8 chars
+		req.Header.Set("X-402-Nonce", "user1-11111111")
+		req.RemoteAddr = "192.168.1.1:12345" // Explicit IP for User 1
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		if w.Code != 200 {
@@ -190,6 +191,7 @@ func TestRateLimitMiddleware_DifferentKeys(t *testing.T) {
 	req1, _ := http.NewRequest("GET", "/test", nil)
 	req1.Header.Set("X-402-Signature", "sig1")
 	req1.Header.Set("X-402-Nonce", "user1-11111111")
+	req1.RemoteAddr = "192.168.1.1:12345" // Same IP as User 1
 	w1 := httptest.NewRecorder()
 	r.ServeHTTP(w1, req1)
 	if w1.Code != 429 {
@@ -199,7 +201,8 @@ func TestRateLimitMiddleware_DifferentKeys(t *testing.T) {
 	// User 2 should still be allowed (different bucket)
 	req2, _ := http.NewRequest("GET", "/test", nil)
 	req2.Header.Set("X-402-Signature", "sig2")
-	req2.Header.Set("X-402-Nonce", "user2-22222222") // Different first 8 chars
+	req2.Header.Set("X-402-Nonce", "user2-22222222")
+	req2.RemoteAddr = "192.168.1.2:12345" // Different IP for User 2
 	w2 := httptest.NewRecorder()
 	r.ServeHTTP(w2, req2)
 	if w2.Code != 200 {
@@ -246,10 +249,10 @@ func TestGetRateLimitKey(t *testing.T) {
 		nonce       string
 		expectedKey string
 	}{
-		{"With both signature and nonce", "sig123", "test-nonce", "nonce:"},
-		{"Only nonce (no signature)", "", "test-nonce", "ip:"},
-		{"Only signature (no nonce)", "sig123", "", "ip:"},
-		{"Neither", "", "", "ip:"},
+		{"IP-based rate limiting (with signature and nonce)", "sig123", "test-nonce", "ip:"},
+		{"IP-based rate limiting (with nonce only)", "", "test-nonce", "ip:"},
+		{"IP-based rate limiting (with signature only)", "sig123", "", "ip:"},
+		{"IP-based rate limiting (without auth headers)", "", "", "ip:"},
 	}
 
 	for _, tt := range tests {
@@ -258,18 +261,10 @@ func TestGetRateLimitKey(t *testing.T) {
 			r.GET("/test", func(c *gin.Context) {
 				key := getRateLimitKey(c)
 
-				if strings.HasPrefix(tt.expectedKey, "nonce:") {
-					if !strings.HasPrefix(key, "nonce:") {
-						t.Errorf("Expected nonce-based key, got '%s'", key)
-					}
-					hashPart := strings.TrimPrefix(key, "nonce:")
-					if len(hashPart) != 32 {
-						t.Errorf("Expected hash to be 32 chars, got %d", len(hashPart))
-					}
-				} else {
-					if !strings.HasPrefix(key, "ip:") {
-						t.Errorf("Expected IP-based key, got '%s'", key)
-					}
+				// After fix: All keys should be IP-based to prevent
+				// infinite bucket attacks from unique nonces
+				if !strings.HasPrefix(key, "ip:") {
+					t.Errorf("Expected IP-based key, got '%s'", key)
 				}
 				c.JSON(200, gin.H{"key": key})
 			})
