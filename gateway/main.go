@@ -349,7 +349,7 @@ func main() {
 	defer func() {
 		cleanupCancel()
 		// Perform final cleanup on shutdown to prevent receipt leak
-		cleanupExpiredReceipts()
+		cleanupExpiredReceipts(context.Background())
 		log.Println("Final receipt cleanup completed on shutdown")
 		// Close Redis connection if active
 		if redisClient != nil {

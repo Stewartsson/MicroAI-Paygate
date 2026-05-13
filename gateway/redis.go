@@ -15,12 +15,17 @@ var redisClient *redis.Client
 
 func initRedis() error {
 	if !isRedisRequired() {
+		if redisClient != nil {
+			_ = redisClient.Close()
+			redisClient = nil
+		}
 		return nil
 	}
 
 	// Close existing client if any
 	if redisClient != nil {
 		_ = redisClient.Close()
+		redisClient = nil
 	}
 
 	// Parse Redis connection options

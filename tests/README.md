@@ -5,13 +5,18 @@ This directory contains End-to-End (E2E) tests for the MicroAI Paygate system.
 ## Prerequisites
 
 - [Bun](https://bun.sh) installed
-- The MicroAI Paygate stack running (`bun run stack` in the root directory; memory receipts and cache disabled unless overridden)
 - Go toolchain (for gateway build in helper script)
 - Rust toolchain (for verifier build in helper script)
 
+Manual flow:
+- Start the MicroAI Paygate stack first (`bun run stack` in the root directory; memory receipts and cache disabled unless overridden)
+
+Helper flow:
+- `bun run test:e2e` uses `run_e2e.sh` to build and start the gateway and verifier for you
+
 ## Running E2E Tests
 
-The E2E tests require the Gateway and Verifier services to be running. A helper script (`run_e2e.sh`) will build and start them for you before running tests.
+The E2E tests target the Gateway and Verifier services. The default command uses `run_e2e.sh` to build and start both services before running tests.
 
 ```bash
 bun run test:e2e

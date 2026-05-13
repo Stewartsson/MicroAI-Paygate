@@ -47,7 +47,7 @@ func (s *InMemoryReceiptStore) Store(ctx context.Context, receipt *SignedReceipt
 	defer s.mu.Unlock()
 
 	s.receipts[receipt.Receipt.ID] = &receiptEntry{
-		receipt:   receipt,
+		receipt:   cloneSignedReceipt(receipt),
 		expiresAt: s.now().Add(ttl),
 	}
 
@@ -75,7 +75,7 @@ func (s *InMemoryReceiptStore) Get(ctx context.Context, id string) (*SignedRecei
 		return nil, false, nil
 	}
 
-	return entry.receipt, true, nil
+	return cloneSignedReceipt(entry.receipt), true, nil
 }
 
 func (s *InMemoryReceiptStore) CleanupExpired(ctx context.Context) error {
@@ -105,6 +105,14 @@ func (s *InMemoryReceiptStore) CleanupExpired(ctx context.Context) error {
 
 func (s *InMemoryReceiptStore) Close() error {
 	return nil
+}
+
+func cloneSignedReceipt(receipt *SignedReceipt) *SignedReceipt {
+	if receipt == nil {
+		return nil
+	}
+	clone := *receipt
+	return &clone
 }
 
 func validateReceiptTTL(ttl time.Duration) error {
@@ -158,13 +166,13 @@ func startReceiptCleanup(ctx context.Context) {
 			log.Println("Receipt cleanup goroutine stopped")
 			return
 		case <-ticker.C:
-			cleanupExpiredReceipts()
+			cleanupExpiredReceipts(ctx)
 		}
 	}
 }
 
-func cleanupExpiredReceipts() {
-	if err := getActiveReceiptStore().CleanupExpired(context.Background()); err != nil {
+func cleanupExpiredReceipts(ctx context.Context) {
+	if err := getActiveReceiptStore().CleanupExpired(ctx); err != nil {
 		log.Printf("Failed to cleanup expired receipts: %v", err)
 	}
 }
