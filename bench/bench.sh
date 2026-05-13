@@ -223,7 +223,7 @@ response = function(status, headers, body)
   if status ~= 200 then
     non_200_responses = non_200_responses + 1
   end
-  if not string.find(body or "", '"is_valid":true', 1, true) then
+  if not string.find(body or "", '"is_valid"%s*:%s*true') then
     invalid_responses = invalid_responses + 1
   end
 end

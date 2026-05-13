@@ -17,6 +17,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var (
+	serverPrivateKeyTestMu sync.Mutex
+	receiptGlobalsTestMu   sync.Mutex
+)
+
 func TestRedisReceiptStore_PersistsAcrossGatewayRestart(t *testing.T) {
 	ctx := t.Context()
 	redisServer := miniredis.RunT(t)
@@ -94,13 +99,18 @@ func TestRedisReceiptStore_PersistsAcrossGatewayRestart(t *testing.T) {
 		_ = rdb.Del(ctx, redisReceiptKey(created.Receipt.ID)).Err()
 	})
 
-	// Simulate a gateway restart by replacing the active receipt store and
-	// routing the lookup through a fresh Gin engine.
-	restartedStore, err := NewRedisReceiptStore(redisClient)
-	if err != nil {
-		t.Fatalf("new restarted receipt store: %v", err)
+	// Simulate a gateway restart by rebuilding Redis and receipt-store globals
+	// from environment config before routing the lookup through a fresh engine.
+	if redisClient != nil {
+		_ = redisClient.Close()
+		redisClient = nil
 	}
-	setActiveReceiptStore(restartedStore)
+	if err := initRedis(); err != nil {
+		t.Fatalf("restart init redis: %v", err)
+	}
+	if err := initReceiptStore(); err != nil {
+		t.Fatalf("restart init receipt store: %v", err)
+	}
 
 	secondGateway := newReceiptPersistenceTestRouter()
 	lookupReq := httptest.NewRequest(http.MethodGet, "/api/receipts/"+created.Receipt.ID, nil)
@@ -141,6 +151,7 @@ func newReceiptPersistenceTestRouter() *gin.Engine {
 
 func resetServerPrivateKeyForTest(t *testing.T) {
 	t.Helper()
+	serverPrivateKeyTestMu.Lock()
 	origKey := serverPrivateKey
 	origErr := serverPrivateKeyErr
 	serverPrivateKey = nil
@@ -150,11 +161,13 @@ func resetServerPrivateKeyForTest(t *testing.T) {
 		serverPrivateKey = origKey
 		serverPrivateKeyErr = origErr
 		serverPrivateKeyOnce = sync.Once{}
+		serverPrivateKeyTestMu.Unlock()
 	})
 }
 
 func replaceReceiptGlobalsForTest(t *testing.T) func() {
 	t.Helper()
+	receiptGlobalsTestMu.Lock()
 	origRedisClient := redisClient
 	origStore := getActiveReceiptStore()
 	origAIProvider := aiProvider
@@ -165,5 +178,6 @@ func replaceReceiptGlobalsForTest(t *testing.T) func() {
 		redisClient = origRedisClient
 		setActiveReceiptStore(origStore)
 		aiProvider = origAIProvider
+		receiptGlobalsTestMu.Unlock()
 	}
 }
