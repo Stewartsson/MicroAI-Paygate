@@ -1,0 +1,25 @@
+app = "<verifier-app>"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  EXPECTED_CHAIN_ID = "84532"
+  SIGNATURE_EXPIRY_SECONDS = "300"
+  SIGNATURE_CLOCK_SKEW_SECONDS = "60"
+
+[checks]
+  [checks.health]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    port = 3002
+    timeout = "5s"
+    type = "http"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
