@@ -207,8 +207,12 @@ func main() {
 	if port := os.Getenv("PORT"); port != "" {
 		fmt.Printf("    - Port: %s\n", port)
 	}
-	if model := os.Getenv("MODEL"); model != "" {
-		fmt.Printf("    - Model: %s\n", model)
+	modelKey := "OPENROUTER_MODEL"
+	if providerType == "ollama" {
+		modelKey = "OLLAMA_MODEL"
+	}
+	if model := os.Getenv(modelKey); model != "" {
+		fmt.Printf("    - %s: %s\n", modelKey, model)
 	}
 	if verifier := os.Getenv("VERIFIER_URL"); verifier != "" {
 		fmt.Printf("    - Verifier: %s\n", verifier)
@@ -219,8 +223,8 @@ func main() {
 	if os.Getenv("PORT") == "" {
 		fmt.Println("[WARN] PORT not set, using default: 3000")
 	}
-	if os.Getenv("MODEL") == "" {
-		fmt.Println("[WARN] MODEL not set, using default model")
+	if os.Getenv(modelKey) == "" {
+		fmt.Printf("[WARN] %s not set, using provider default model\n", modelKey)
 	}
 	if os.Getenv("VERIFIER_URL") == "" {
 		fmt.Println("[WARN] VERIFIER_URL not set, using default verifier")
@@ -955,8 +959,8 @@ func handleHealthz(c *gin.Context) {
 // handleReadyz implements the readiness probe for the gateway service.
 // It performs a comprehensive health check by verifying:
 // 1. Connectivity to the Verifier service
-// 2. Availability of the OpenRouter API
-// 3. Redis connectivity (if caching is enabled)
+// 2. Availability of the active AI provider
+// 3. Redis connectivity (if caching or Redis-backed receipts are enabled)
 // 4. Self-health metrics (goroutine count, memory usage)
 // Returns 200 OK if all dependencies are healthy, otherwise 503 Service Unavailable.
 func handleReadyz(c *gin.Context) {
@@ -966,9 +970,24 @@ func handleReadyz(c *gin.Context) {
 	verifierStatus := checkVerifierHealth()
 	checks["verifier"] = verifierStatus
 
-	//2. Check OpenRouter availability
-	openRouterStatus := checkOpenRouterHealth()
-	checks["openrouter"] = openRouterStatus
+	//2. Check active AI provider availability
+	providerType := os.Getenv("AI_PROVIDER")
+	if providerType == "" {
+		providerType = "openrouter"
+	}
+	aiStatus := "unsupported"
+	switch providerType {
+	case "openrouter":
+		aiStatus = checkOpenRouterHealth()
+		checks["openrouter"] = aiStatus
+	case "ollama":
+		aiStatus = checkOllamaHealth()
+		checks["ollama"] = aiStatus
+	}
+	checks["ai_provider"] = gin.H{
+		"provider": providerType,
+		"status":   aiStatus,
+	}
 
 	//3. Check Redis connectivity (if caching or Redis-backed receipts are enabled)
 	redisStatus := "disabled"
@@ -997,7 +1016,7 @@ func handleReadyz(c *gin.Context) {
 	}
 
 	//Overall status logic - include Redis if caching or Redis-backed receipts are enabled
-	ready := verifierStatus == "ok" && openRouterStatus == "ok"
+	ready := verifierStatus == "ok" && aiStatus == "ok"
 	if isRedisRequired() {
 		ready = ready && redisStatus == "ok"
 	}
@@ -1010,7 +1029,7 @@ func handleReadyz(c *gin.Context) {
 }
 
 // checkVerifierHealth pings the Verifier service's health endpoint.
-// It uses a 2-second timeout to prevent hanging.
+// It uses HEALTH_CHECK_TIMEOUT_SECONDS to prevent hanging.
 // Returns:
 // - "ok": Verifier is healthy (200 OK)
 // - "degraded": Verifier is reachable but returned non-200 status
@@ -1020,7 +1039,7 @@ var checkVerifierHealth = func() string {
 	if verifierURL == "" {
 		verifierURL = "http://127.0.0.1:3002"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), getHealthCheckTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", verifierURL+"/health", nil)
@@ -1041,8 +1060,57 @@ var checkVerifierHealth = func() string {
 	return "ok"
 }
 
+// checkOllamaHealth checks the availability of the configured Ollama API.
+// It attempts to fetch the local model list with HEALTH_CHECK_TIMEOUT_SECONDS.
+// Returns:
+// - "ok": API is reachable (200 OK)
+// - "degraded": API is reachable but returned non-200 status
+// - "unreachable": API could not be contacted
+var checkOllamaHealth = func() string {
+	ollamaURL := os.Getenv("OLLAMA_URL")
+	if ollamaURL == "" {
+		ollamaURL = "http://localhost:11434"
+	}
+	healthURL := strings.TrimSuffix(ollamaURL, "/") + "/api/tags"
+
+	ctx, cancel := context.WithTimeout(context.Background(), getHealthCheckTimeout())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return "unreachable"
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "unreachable"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "degraded"
+	}
+	return "ok"
+}
+
+func getOpenRouterModelsURL() string {
+	openRouterURL := strings.TrimRight(os.Getenv("OPENROUTER_URL"), "/")
+	if openRouterURL == "" {
+		return "https://openrouter.ai/api/v1/models"
+	}
+	if strings.HasSuffix(openRouterURL, "/chat/completions") {
+		return strings.TrimSuffix(openRouterURL, "/chat/completions") + "/models"
+	}
+	if strings.HasSuffix(openRouterURL, "/api/v1") {
+		return openRouterURL + "/models"
+	}
+	if strings.HasSuffix(openRouterURL, "/models") {
+		return openRouterURL
+	}
+	return openRouterURL + "/api/v1/models"
+}
+
 // checkOpenRouterHealth checks the availability of the OpenRouter API.
-// It attempts to fetch the list of models with a 2-second timeout.
+// It attempts to fetch the list of models with HEALTH_CHECK_TIMEOUT_SECONDS.
 // Returns:
 // - "ok": API is reachable (200 OK)
 // - "unconfigured": OPENROUTER_API_KEY is not set
@@ -1053,13 +1121,9 @@ var checkOpenRouterHealth = func() string {
 	if apiKey == "" {
 		return "unconfigured"
 	}
-	baseURL := os.Getenv("OPENROUTER_URL")
-	if baseURL == "" {
-		baseURL = "https://openrouter.ai"
-	}
-	healthURL := strings.TrimSuffix(baseURL, "/") + "/api/v1/models"
+	healthURL := getOpenRouterModelsURL()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), getHealthCheckTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)

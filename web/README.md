@@ -1,53 +1,80 @@
 # Web Frontend
 
-The Web Frontend is the user-facing interface for MicroAI Paygate. Built with Next.js, it manages the user journey from inputting text to signing crypto transactions.
+The web app is a Next.js/Bun frontend on port `3001`. It lets users submit text for summarization, receives `402 Payment Required` contexts from the gateway, prompts an EVM wallet to switch chain and sign EIP-712 typed data, and retries the request with x402 headers.
 
-## Role & Responsibilities
+## Responsibilities
 
-- **User Interface**: Provides a clean, responsive UI for text summarization.
-- **Wallet Integration**: Connects to EVM-compatible browser wallets (MetaMask, Rabby, Coinbase Wallet) using `ethers.js`.
-- **Payment Flow Handling**:
-    1.  Sends initial request.
-    2.  Catches `402 Payment Required` errors.
-    3.  Prompts user to sign EIP-712 typed data.
-    4.  Retries request with signature headers.
-- **Network Management**: Automatically detects network mismatches and prompts switching to the Base Sepolia network.
+- Send unsigned summarize requests to the gateway.
+- Detect `402` responses and read `paymentContext`.
+- Detect an injected EVM provider such as MetaMask, Rabby, or Coinbase Wallet.
+- Switch or add the requested chain when the wallet is on the wrong network.
+- Sign the gateway-provided EIP-712 payment context.
+- Retry with `X-402-Signature`, `X-402-Nonce`, and `X-402-Timestamp`.
+- Display summary results or user-facing errors.
 
-## Technology Stack
+## Current Configuration
 
-- **Framework**: Next.js 16 (App Router)
-- **Language**: TypeScript
-- **Styling**: Tailwind CSS
-- **Blockchain Interaction**: Ethers.js v6
+The current frontend reads one public environment variable:
 
-## Key Files
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `NEXT_PUBLIC_GATEWAY_URL` | `http://localhost:3000` | Gateway base URL used by browser fetch calls. |
 
-- `src/app/page.tsx`: The main application logic, including state management and the `handleSummarize` function.
-- `Dockerfile`: Configuration for building the Next.js application for production.
+The current app does not read `NEXT_PUBLIC_CHAIN_ID`, `NEXT_PUBLIC_RPC_URL`, or `NEXT_PUBLIC_RECIPIENT`. Chain ID, recipient, amount, nonce, and timestamp come from the gateway payment context.
 
-## Development
+## Payment Signing Shape
 
-To run the frontend locally:
+The frontend signs the same EIP-712 domain and type enforced by the verifier:
+
+```text
+Domain:
+  name: MicroAI Paygate
+  version: 1
+  chainId: paymentContext.chainId
+  verifyingContract: 0x0000000000000000000000000000000000000000
+
+Payment:
+  recipient address
+  token string
+  amount string
+  nonce string
+  timestamp uint256
+```
+
+If this shape changes, update gateway, verifier, web, E2E tests, OpenAPI, and docs together.
+
+## Local Development
+
+Install dependencies:
+
+```bash
+cd web
+bun install
+```
+
+Run the app:
 
 ```bash
 bun run dev
 ```
 
-The application will be available at `http://localhost:3001`.
+Open `http://localhost:3001`.
 
-## Configuration
+The gateway must be reachable at `NEXT_PUBLIC_GATEWAY_URL` or `http://localhost:3000`.
 
-Environment variables (place in `.env.local` or `.env`):
+## Production Build
 
-- `NEXT_PUBLIC_GATEWAY_URL` — gateway base URL (e.g., http://localhost:3000)
-- `NEXT_PUBLIC_CHAIN_ID` — chain id for EIP-712 domain (align with gateway/verifier)
-- `NEXT_PUBLIC_RPC_URL` — RPC endpoint for wallet network detection/switching
-- `NEXT_PUBLIC_RECIPIENT` — expected recipient address for payments
+```bash
+cd web
+bun run lint
+bun run build
+bun run test
+```
 
-## Payment Flow
+`bun run test` runs `tsc --noEmit`.
 
-1) Send summarize request to gateway. 2) Receive `402 Payment Required`. 3) Sign EIP-712 typed data in-browser. 4) Retry with `X-402-Signature` and `X-402-Nonce`. 5) Display AI result or failure if the upstream model call fails.
+## Deployment Notes
 
-## Testing
+`web/vercel.json` configures Vercel to install with Bun and build with `bun run build`. Set `NEXT_PUBLIC_GATEWAY_URL` in Vercel project environment settings; do not hard-code the real gateway URL in committed files.
 
-Frontend E2E coverage is driven from the root `tests/e2e.test.ts`; ensure the gateway and verifier are reachable at the configured URLs when running it.
+When linking the Vercel project, use `web` as the project root.

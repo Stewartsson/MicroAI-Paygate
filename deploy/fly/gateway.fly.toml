@@ -9,7 +9,10 @@ primary_region = "bom"
 [env]
   PORT = "3000"
   VERIFIER_URL = "http://<verifier-app>.internal:3002"
+  OPENROUTER_MODEL = "z-ai/glm-4.5-air:free"
+  PAYMENT_AMOUNT = "0.001"
   CHAIN_ID = "84532"
+  ALLOWED_ORIGINS = "https://<your-vercel-app>.vercel.app"
   RECEIPT_STORE = "redis"
   # Keep disabled unless Redis has enough capacity for both receipts and cache.
   CACHE_ENABLED = "false"

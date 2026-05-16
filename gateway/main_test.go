@@ -425,6 +425,75 @@ func TestHandleReadyz_Healthy(t *testing.T) {
 	require.Contains(t, gatewayChecks, "memory_alloc_mb")
 	require.Contains(t, gatewayChecks, "memory_sys_mb")
 }
+
+func TestHandleReadyz_OllamaProviderUsesOllamaHealth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("AI_PROVIDER", "ollama")
+	t.Setenv("RECEIPT_STORE", "memory")
+	t.Setenv("CACHE_ENABLED", "false")
+
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaServer.Close()
+	t.Setenv("OLLAMA_URL", ollamaServer.URL)
+
+	origVerifier := checkVerifierHealth
+	origOpenRouter := checkOpenRouterHealth
+	defer func() {
+		checkVerifierHealth = origVerifier
+		checkOpenRouterHealth = origOpenRouter
+	}()
+
+	checkVerifierHealth = func() string { return "ok" }
+	checkOpenRouterHealth = func() string { return "unconfigured" }
+
+	r := gin.Default()
+	r.GET("/readyz", handleReadyz)
+
+	req, _ := http.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	require.Equal(t, true, response["ready"])
+
+	checks := response["checks"].(map[string]interface{})
+	require.Equal(t, "ok", checks["ollama"])
+	require.NotContains(t, checks, "openrouter")
+
+	aiProvider := checks["ai_provider"].(map[string]interface{})
+	require.Equal(t, "ollama", aiProvider["provider"])
+	require.Equal(t, "ok", aiProvider["status"])
+}
+
+func TestCheckOpenRouterHealthAcceptsChatCompletionsURL(t *testing.T) {
+	openRouterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/models" || r.Header.Get("Authorization") != "Bearer test-key" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openRouterServer.Close()
+
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+	t.Setenv("OPENROUTER_URL", openRouterServer.URL+"/api/v1/chat/completions")
+
+	require.Equal(t, "ok", checkOpenRouterHealth())
+}
+
 func TestHandleReadyz_UnHealthy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("RECEIPT_STORE", "memory")

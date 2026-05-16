@@ -1,88 +1,143 @@
 # Verifier Service
 
-The Verifier is a specialized microservice dedicated to cryptographic operations. Written in Rust, it provides a secure and isolated environment for validating EIP-712 signatures.
+The verifier is a Rust/Axum service on port `3002`. It validates EIP-712 payment signatures for the gateway and rejects malformed signatures, wrong-chain contexts, expired/future timestamps, and replayed nonces for a single verifier instance.
 
-## Role & Responsibilities
+## Responsibilities
 
-- **Signature Validation**: Receives a payment context and a signature from the Gateway.
-- **ECDSA Recovery**: Uses the `ethers-rs` library to recover the signer's address from the cryptographic signature.
-- **Chain Enforcement**: Rejects signatures for any chain other than the configured verifier chain.
-- **Replay Protection**: Tracks recently used nonce hashes in memory for a single verifier instance.
+- Accept `POST /verify` requests from the gateway.
+- Enforce EIP-712 domain parity with gateway, web, and E2E signing code.
+- Recover the signer address from the wallet signature.
+- Reject chain ID mismatches before signature acceptance.
+- Reject expired timestamps and future timestamps beyond allowed clock skew.
+- Reject reused nonce hashes inside the configured signature window.
+- Return structured `error_code` values that the gateway maps to sanitized public errors.
 
-## Technology Stack
+## EIP-712 Domain
 
-- **Language**: Rust (2021 Edition)
-- **Web Framework**: Axum
-- **Cryptography**: `ethers-rs` (bindings to `k256` and `secp256k1`)
-- **Serialization**: Serde / Serde JSON
+| Field | Value |
+| --- | --- |
+| `name` | `MicroAI Paygate` |
+| `version` | `1` |
+| `chainId` | `EXPECTED_CHAIN_ID`, falling back to `CHAIN_ID`, then `84532` |
+| `verifyingContract` | `0x0000000000000000000000000000000000000000` |
 
-## Key Files
+Payment type:
 
-- `src/main.rs`: The single-file implementation containing the HTTP server and the `verify_signature` logic.
-- `Cargo.toml`: Dependency definitions including `axum`, `tokio`, and `ethers`.
-- `Dockerfile`: Multi-stage build configuration producing a minimal binary.
-
-## Development
-
-To run the verifier locally:
-
-```bash
-cargo run
+```text
+Payment(
+  address recipient,
+  string token,
+  string amount,
+  string nonce,
+  uint256 timestamp
+)
 ```
 
-The service listens on port 3002 by default.
+Any change to this shape must be applied together in:
 
-## Configuration
+- `gateway/main.go`
+- `verifier/src/main.rs`
+- `web/src/app/page.tsx`
+- `tests/e2e.test.ts`
+- `gateway/openapi.yaml`
+- Root and service documentation
 
-The Verifier uses environment variables for security and performance tuning.
+## API
 
-### Environment Variables
+### `GET /health`
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `MAX_REQUEST_BODY_BYTES` | The maximum allowed size for JSON payloads in bytes | `1048576` (1MB) |
-| `EXPECTED_CHAIN_ID` | Chain ID enforced before signature recovery. If unset, the verifier falls back to `CHAIN_ID`. | `84532` (Base Sepolia) |
-| `SIGNATURE_EXPIRY_SECONDS` | Signature freshness window and nonce retention TTL | `300` |
-| `SIGNATURE_CLOCK_SKEW_SECONDS` | Allowed client clock skew for future timestamps | `60` |
+Returns:
 
-It also uses hardcoded EIP-712 domain values for cryptographic verification:
-
-- **name**: MicroAI Paygate
-- **version**: 1
-- **chainId**: `EXPECTED_CHAIN_ID`, or `CHAIN_ID` when `EXPECTED_CHAIN_ID` is unset (default `84532` for Base Sepolia)
-- **verifyingContract**: `0x0000000000000000000000000000000000000000`
-
-If you change domain parameters in the gateway or frontend, update them here to stay in sync.
-
-Nonce replay protection is in-memory and protects a single verifier instance. Multi-replica production deployments need Redis or another shared nonce store so all verifier replicas reject the same replayed nonce.
-
-## API Endpoints
-
-### Health Check
-
-```bash
-curl http://localhost:3002/health
-```
-
-**Response:**
 ```json
 {
   "status": "healthy",
   "service": "verifier",
-  "version": "<cargo pkg version>"
+  "version": "<cargo package version>"
 }
 ```
 
-The health endpoint returns the service status, name, and current version from Cargo.toml. Use this endpoint to verify the verifier is running and to detect if the service is down.
+### `POST /verify`
 
-### Signature Verification
+Request shape:
+
+```json
+{
+  "context": {
+    "recipient": "0x2cAF48b4BA1C58721a85dFADa5aC01C2DFa62219",
+    "token": "USDC",
+    "amount": "0.001",
+    "nonce": "550e8400-e29b-41d4-a716-446655440000",
+    "chainId": 84532,
+    "timestamp": 1700000000
+  },
+  "signature": "0x..."
+}
+```
+
+Successful response:
+
+```json
+{
+  "is_valid": true,
+  "recovered_address": "0x...",
+  "error": null
+}
+```
+
+Business rejection response:
+
+```json
+{
+  "is_valid": false,
+  "recovered_address": null,
+  "error": "human-readable verifier detail",
+  "error_code": "invalid_signature"
+}
+```
+
+Important error codes:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_signature` | Signature recovery failed or signer did not match the context. |
+| `chain_id_mismatch` | Payment context chain does not match verifier expectation. |
+| `timestamp_expired` | Timestamp is older than `SIGNATURE_EXPIRY_SECONDS`. |
+| `timestamp_future` | Timestamp is beyond allowed future skew. |
+| `timestamp_missing` | Timestamp field is missing or invalid. |
+| `nonce_already_used` | Nonce hash was already accepted inside the signature window. |
+
+## Configuration
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `MAX_REQUEST_BODY_BYTES` | `1048576` | JSON body size limit. |
+| `EXPECTED_CHAIN_ID` | `84532` | Preferred chain ID enforcement variable. |
+| `CHAIN_ID` | unset | Fallback when `EXPECTED_CHAIN_ID` is unset. |
+| `SIGNATURE_EXPIRY_SECONDS` | `300` | Signature freshness window and nonce retention TTL. |
+| `SIGNATURE_CLOCK_SKEW_SECONDS` | `60` | Allowed future timestamp skew. |
+
+## Replay Protection
+
+Nonce replay protection is in memory. It protects one verifier process. Production multi-replica verifier deployments need a shared nonce store such as Redis so every replica rejects the same replayed nonce.
+
+Keep the verifier at one Fly Machine until shared nonce storage exists.
+
+## Local Development
 
 ```bash
-curl -X POST http://localhost:3002/verify -H "Content-Type: application/json" -d '{"context":{...},"signature":"0x..."}'
+cd verifier
+cargo run
 ```
+
+The service listens on `0.0.0.0:3002` by default.
 
 ## Testing
 
 ```bash
+cd verifier
+cargo fmt -- --check
+cargo clippy -- -D warnings
 cargo test
 ```
+
+Run these checks after changing EIP-712 fields, chain ID parsing, timestamp logic, nonce replay protection, request body limits, response schemas, or dependencies.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refresh public contributor documentation for the current Go gateway, Rust verifier, Next.js web, Redis receipt/cache, and Fly/Vercel deployment-prep architecture.
+- Add open source community files: support guide, code of conduct, issue templates, and pull request template.
+- Expand `gateway/openapi.yaml` to document readiness and receipt lookup endpoints alongside the x402 summarize flow.
+- Align local setup docs, service READMEs, environment examples, and contribution checks with the current codebase.
 - Add configurable gateway CORS origins via `ALLOWED_ORIGINS`.
 - Add configurable receipt storage via `RECEIPT_STORE`, defaulting to Redis-backed receipts with `memory` available for tests and local experiments.
 - Add a reproducible verifier micro-benchmark harness under `bench/` with raw `wrk` output captured in `bench/RESULTS-2026-05-13.txt`.

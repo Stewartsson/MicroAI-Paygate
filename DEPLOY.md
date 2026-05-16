@@ -66,14 +66,12 @@ Use placeholders until Phase 4. Do not commit real secret values.
 ```sh
 fly secrets set -a <gateway-app> \
   OPENROUTER_API_KEY=<your-openrouter-api-key> \
-  OPENROUTER_MODEL=z-ai/glm-4.5-air:free \
   SERVER_WALLET_PRIVATE_KEY=<your-demo-server-wallet-private-key> \
   RECIPIENT_ADDRESS=<your-base-sepolia-recipient-address> \
-  REDIS_URL=<your-upstash-redis-url> \
-  ALLOWED_ORIGINS=https://<your-vercel-app>.vercel.app
+  REDIS_URL=<your-upstash-redis-url>
 ```
 
-`OPENROUTER_MODEL` is a non-secret model selection. The value above is the default demo model; replace it if you choose a different OpenRouter model.
+Non-secret gateway settings such as `OPENROUTER_MODEL`, `PAYMENT_AMOUNT`, and `ALLOWED_ORIGINS` live in `deploy/fly/gateway.fly.toml`. Edit those placeholders before deploying instead of setting them as Fly secrets.
 
 If you later enable `RATE_LIMIT_ENABLED=true` on Fly, configure trusted Fly proxy CIDRs first so IP-based rate limiting uses real client IPs instead of a shared proxy address:
 
@@ -81,6 +79,8 @@ If you later enable `RATE_LIMIT_ENABLED=true` on Fly, configure trusted Fly prox
 fly secrets set -a <gateway-app> \
   TRUSTED_PROXIES=<fly-proxy-cidr>
 ```
+
+Mirror non-secret runtime values from `.env.production.example` in the Fly config files and use Fly secrets only for secret values or values you intentionally do not want committed. Keep `CHAIN_ID` and `EXPECTED_CHAIN_ID` synchronized.
 
 The verifier currently needs no secret material. Its non-secret defaults are committed in `deploy/fly/verifier.fly.toml`:
 
