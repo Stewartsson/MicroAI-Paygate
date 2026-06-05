@@ -48,6 +48,7 @@ services:
       - SIGNATURE_CLOCK_SKEW_SECONDS=${SIGNATURE_CLOCK_SKEW_SECONDS:-60}
       - VERIFIER_NONCE_STORE=${VERIFIER_NONCE_STORE:-redis}
       - VERIFIER_NONCE_KEY_PREFIX=${VERIFIER_NONCE_KEY_PREFIX:-microai:verifier:nonce:}
+      - VERIFIER_REDIS_TIMEOUT_MS=${VERIFIER_REDIS_TIMEOUT_MS:-2000}
       - REDIS_URL=${REDIS_URL:-redis:6379}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3002/health >/dev/null 2>&1"]

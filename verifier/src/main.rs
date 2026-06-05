@@ -164,6 +164,45 @@ fn normalize_redis_url(raw_url: &str) -> String {
     }
 }
 
+fn redis_url_has_database(redis_url: &str) -> bool {
+    let without_scheme = redis_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(redis_url);
+    let path_end = without_scheme
+        .find(['?', '#'])
+        .unwrap_or(without_scheme.len());
+    let Some(path_start) = without_scheme[..path_end].find('/') else {
+        return false;
+    };
+
+    !without_scheme[path_start + 1..path_end].trim().is_empty()
+}
+
+fn get_non_empty_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn verifier_redis_connection_info(
+    raw_url: &str,
+) -> Result<redis::ConnectionInfo, redis::RedisError> {
+    let redis_url = normalize_redis_url(raw_url);
+    let has_database = redis_url_has_database(&redis_url);
+    let mut connection_info: redis::ConnectionInfo = redis_url.as_str().parse()?;
+
+    if connection_info.redis.password.is_none() {
+        connection_info.redis.password = get_non_empty_env("REDIS_PASSWORD");
+    }
+    if !has_database {
+        if let Some(db) = get_non_empty_env("REDIS_DB").and_then(|value| value.parse::<i64>().ok())
+        {
+            connection_info.redis.db = db;
+        }
+    }
+
+    Ok(connection_info)
+}
+
 fn get_redis_nonce_key_prefix() -> String {
     env::var("VERIFIER_NONCE_KEY_PREFIX")
         .ok()
@@ -193,8 +232,11 @@ fn build_nonce_store_from_env() -> Result<Arc<NonceStore>, String> {
         "redis" => {
             let redis_url = env::var("REDIS_URL")
                 .map_err(|_| "VERIFIER_NONCE_STORE=redis requires REDIS_URL".to_string())?;
-            let client = redis::Client::open(normalize_redis_url(&redis_url))
-                .map_err(|err| format!("invalid REDIS_URL for verifier nonce store: {err}"))?;
+            let client = redis::Client::open(
+                verifier_redis_connection_info(&redis_url)
+                    .map_err(|err| format!("invalid REDIS_URL for verifier nonce store: {err}"))?,
+            )
+            .map_err(|err| format!("invalid REDIS_URL for verifier nonce store: {err}"))?;
 
             Ok(Arc::new(NonceStore::Redis(RedisNonceStore {
                 client,
@@ -830,6 +872,36 @@ mod tests {
         }
     }
 
+    fn with_redis_auth_env(
+        redis_password: Option<&str>,
+        redis_db: Option<&str>,
+        test: impl FnOnce(),
+    ) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_redis_password = env::var("REDIS_PASSWORD").ok();
+        let old_redis_db = env::var("REDIS_DB").ok();
+
+        match redis_password {
+            Some(value) => env::set_var("REDIS_PASSWORD", value),
+            None => env::remove_var("REDIS_PASSWORD"),
+        }
+        match redis_db {
+            Some(value) => env::set_var("REDIS_DB", value),
+            None => env::remove_var("REDIS_DB"),
+        }
+
+        test();
+
+        match old_redis_password {
+            Some(value) => env::set_var("REDIS_PASSWORD", value),
+            None => env::remove_var("REDIS_PASSWORD"),
+        }
+        match old_redis_db {
+            Some(value) => env::set_var("REDIS_DB", value),
+            None => env::remove_var("REDIS_DB"),
+        }
+    }
+
     #[test]
     fn test_get_expected_chain_id_defaults_to_base_sepolia() {
         with_chain_env(None, None, || {
@@ -869,6 +941,31 @@ mod tests {
             normalize_redis_url("rediss://cache.example.com:6380"),
             "rediss://cache.example.com:6380"
         );
+    }
+
+    #[test]
+    fn test_verifier_redis_connection_info_uses_env_fallbacks_for_bare_url() {
+        with_redis_auth_env(Some("secret"), Some("2"), || {
+            let connection_info = verifier_redis_connection_info("redis:6379").unwrap();
+
+            assert_eq!(connection_info.redis.password.as_deref(), Some("secret"));
+            assert_eq!(connection_info.redis.db, 2);
+        });
+    }
+
+    #[test]
+    fn test_verifier_redis_connection_info_preserves_explicit_url_auth_and_db() {
+        with_redis_auth_env(Some("env-secret"), Some("2"), || {
+            let connection_info =
+                verifier_redis_connection_info("redis://user:url-secret@redis:6379/4").unwrap();
+
+            assert_eq!(connection_info.redis.username.as_deref(), Some("user"));
+            assert_eq!(
+                connection_info.redis.password.as_deref(),
+                Some("url-secret")
+            );
+            assert_eq!(connection_info.redis.db, 4);
+        });
     }
 
     #[test]
