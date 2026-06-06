@@ -50,6 +50,8 @@ services:
       - VERIFIER_NONCE_KEY_PREFIX=${VERIFIER_NONCE_KEY_PREFIX:-microai:verifier:nonce:}
       - VERIFIER_REDIS_TIMEOUT_MS=${VERIFIER_REDIS_TIMEOUT_MS:-2000}
       - REDIS_URL=${REDIS_URL:-redis:6379}
+      - REDIS_PASSWORD
+      - REDIS_DB
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3002/health >/dev/null 2>&1"]
       interval: 5s
