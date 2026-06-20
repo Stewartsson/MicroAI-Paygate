@@ -224,9 +224,20 @@ async fn main() {
     let limit = get_max_body_size();
     let nonce_store =
         build_nonce_store_from_env().expect("failed to configure verifier nonce store");
+
+    // Dynamic Environment Parsing for supported chains
+    let mut supported_chains = SUPPORTED_CHAINS.to_vec();
+    if let Ok(env_chain_str) = std::env::var("EXPECTED_CHAIN_ID") {
+        if let Ok(parsed_env_id) = env_chain_str.parse::<u64>() {
+            if !supported_chains.contains(&parsed_env_id) {
+                supported_chains.push(parsed_env_id);
+            }
+        }
+    }
+
     let state = AppState {
         max_body_size: limit,
-        supported_chains: SUPPORTED_CHAINS.to_vec(),
+        supported_chains,
         nonce_store,
         signature_expiry_seconds: get_env_u64("SIGNATURE_EXPIRY_SECONDS", 300),
         clock_skew_seconds: get_env_u64("SIGNATURE_CLOCK_SKEW_SECONDS", 60),
