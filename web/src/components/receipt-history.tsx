@@ -54,17 +54,6 @@ export function ReceiptHistory() {
     return () => observer.disconnect();
   }, []);
 
-  /**
-   * Constructs the EIP-712 domain separator using the mandatory contract metadata.
-   * Aligns with MicroAI Paygate signature parameters.
-   */
-  const getDomainSeparator = (receipt: any) => ({
-    name: "MicroAI Paygate",
-    version: "1",
-    chainId: Number(receipt.metadata?.chainId || 84532),
-    verifyingContract: "0x0000000000000000000000000000000000000000",
-  });
-
   if (entries.length === 0) {
     return (
       <div ref={rootRef} className="border border-dashed border-ink-faint bg-paper p-10 text-center">
