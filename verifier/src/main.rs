@@ -176,7 +176,6 @@ async fn main() {
 
     let mut supported_chains = SUPPORTED_CHAINS.to_vec();
     
-    // Fallback parsing for EXPECTED_CHAIN_ID and CHAIN_ID
     for var in &["EXPECTED_CHAIN_ID", "CHAIN_ID"] {
         if let Ok(env_chain_str) = std::env::var(var) {
             if let Ok(parsed_env_id) = env_chain_str.parse::<u64>() {
@@ -306,7 +305,8 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
     }
 
     if let Err(err) = validate_timestamp(payload.context.timestamp, state.signature_expiry_seconds, state.clock_skew_seconds) {
-        return (StatusCode::OK, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(format!("{:?}", err)), error_code: Some("timestamp_invalid".into()) }));
+        // Refactored to 400 Bad Request and updated error_code to "invalid_timestamp"
+        return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(format!("{:?}", err)), error_code: Some("invalid_timestamp".into()) }));
     }
 
     let typed_data = serde_json::json!({
