@@ -225,7 +225,6 @@ async fn main() {
     let nonce_store =
         build_nonce_store_from_env().expect("failed to configure verifier nonce store");
 
-    // Dynamic Environment Parsing for supported chains
     let mut supported_chains = SUPPORTED_CHAINS.to_vec();
     if let Ok(env_chain_str) = std::env::var("EXPECTED_CHAIN_ID") {
         if let Ok(parsed_env_id) = env_chain_str.parse::<u64>() {
@@ -488,7 +487,6 @@ async fn verify_signature(
     let payload = match payload {
         Ok(Json(p)) => p,
         Err(JsonRejection::BytesRejection(_)) => {
-            println!("[CID: {}] Rejected: Payload too large", cid);
             record_verification_failure(&request_start, "payload_too_large");
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -505,7 +503,6 @@ async fn verify_signature(
             );
         }
         Err(e) => {
-            println!("[CID: {}] Rejected: Invalid JSON or formatting", cid);
             record_verification_failure(&request_start, "invalid_json");
             return (
                 StatusCode::BAD_REQUEST,
@@ -519,8 +516,6 @@ async fn verify_signature(
             );
         }
     };
-
-    println!("[CID: {}] Verify nonce={}", cid, payload.context.nonce);
 
     if !state.supported_chains.contains(&payload.context.chain_id) {
         record_verification_failure(&request_start, "chain_id_mismatch");
@@ -545,10 +540,7 @@ async fn verify_signature(
         state.clock_skew_seconds,
     ) {
         let (msg, error_code) = match err {
-            VerifyError::SignatureExpired {
-                age_seconds,
-                max_seconds,
-            } => (
+            VerifyError::SignatureExpired { age_seconds, max_seconds } => (
                 format!("E007: expired (age={} max={})", age_seconds, max_seconds),
                 "timestamp_expired",
             ),
@@ -562,7 +554,6 @@ async fn verify_signature(
         };
 
         record_verification_failure(&request_start, error_code);
-
         return (
             StatusCode::OK,
             res_headers,
@@ -603,7 +594,7 @@ async fn verify_signature(
 
     let typed_data: TypedData = match serde_json::from_value(typed_data_json) {
         Ok(td) => td,
-        Err(e) => {
+        Err(_) => {
             record_verification_failure(&request_start, "typed_data_error");
             return (
                 StatusCode::BAD_REQUEST,
@@ -611,7 +602,7 @@ async fn verify_signature(
                 Json(VerifyResponse {
                     is_valid: false,
                     recovered_address: None,
-                    error: Some(format!("typed data error: {}", e)),
+                    error: Some("typed data error".to_string()),
                     error_code: None,
                 }),
             );
@@ -620,7 +611,7 @@ async fn verify_signature(
 
     let sig = match Signature::from_str(&payload.signature) {
         Ok(s) => s,
-        Err(e) => {
+        Err(_) => {
             record_verification_failure(&request_start, "invalid_signature");
             return (
                 StatusCode::BAD_REQUEST,
@@ -628,7 +619,7 @@ async fn verify_signature(
                 Json(VerifyResponse {
                     is_valid: false,
                     recovered_address: None,
-                    error: Some(format!("bad signature: {}", e)),
+                    error: Some("bad signature".to_string()),
                     error_code: Some("invalid_signature".to_string()),
                 }),
             );
@@ -641,10 +632,22 @@ async fn verify_signature(
     match result {
         Ok(addr) => {
             match claim_nonce(&state, &payload.context.nonce, Instant::now()).await {
-                Ok(true) => {}
+                Ok(true) => {
+                    metrics::record_verification(true, duration, None);
+                    (
+                        StatusCode::OK,
+                        res_headers,
+                        Json(VerifyResponse {
+                            is_valid: true,
+                            recovered_address: Some(format!("{:?}", addr)),
+                            error: None,
+                            error_code: None,
+                        }),
+                    )
+                }
                 Ok(false) => {
                     metrics::record_verification(false, duration, Some("nonce_already_used"));
-                    return (
+                    (
                         StatusCode::CONFLICT,
                         res_headers,
                         Json(VerifyResponse {
@@ -653,11 +656,11 @@ async fn verify_signature(
                             error: Some("nonce already used".to_string()),
                             error_code: Some("nonce_already_used".to_string()),
                         }),
-                    );
+                    )
                 }
                 Err(err) => {
                     metrics::record_verification(false, duration, Some("nonce_store_unavailable"));
-                    return (
+                    (
                         StatusCode::SERVICE_UNAVAILABLE,
                         res_headers,
                         Json(VerifyResponse {
@@ -666,20 +669,9 @@ async fn verify_signature(
                             error: Some(err.to_string()),
                             error_code: Some("nonce_store_unavailable".to_string()),
                         }),
-                    );
+                    )
                 }
             }
-            metrics::record_verification(true, duration, None);
-            (
-                StatusCode::OK,
-                res_headers,
-                Json(VerifyResponse {
-                    is_valid: true,
-                    recovered_address: Some(format!("{:?}", addr)),
-                    error: None,
-                    error_code: None,
-                }),
-            )
         }
         Err(e) => {
             metrics::record_verification(false, duration, Some("invalid_signature"));
@@ -717,79 +709,68 @@ mod tests {
     }
 
     fn now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
     }
 
     async fn signed_request(nonce: &str, chain_id: u64, timestamp: u64) -> VerifyRequest {
-        let wallet: LocalWallet =
-            "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc"
-                .parse()
-                .unwrap();
+        let wallet: LocalWallet = "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc".parse().unwrap();
         let wallet = wallet.with_chain_id(chain_id);
-
         let typed = serde_json::json!({
-            "domain": {
-                "name": "MicroAI Paygate",
-                "version": "1",
-                "chainId": chain_id,
-                "verifyingContract": "0x0000000000000000000000000000000000000000"
-            },
-            "types": {
-                "Payment": [
-                    { "name": "recipient", "type": "address" },
-                    { "name": "token", "type": "string" },
-                    { "name": "amount", "type": "string" },
-                    { "name": "nonce", "type": "string" },
-                    { "name": "timestamp", "type": "uint256" }
-                ]
-            },
+            "domain": { "name": "MicroAI Paygate", "version": "1", "chainId": chain_id, "verifyingContract": "0x0000000000000000000000000000000000000000" },
+            "types": { "Payment": [ { "name": "recipient", "type": "address" }, { "name": "token", "type": "string" }, { "name": "amount", "type": "string" }, { "name": "nonce", "type": "string" }, { "name": "timestamp", "type": "uint256" } ] },
             "primaryType": "Payment",
-            "message": {
-                "recipient": "0x1234567890123456789012345678901234567890",
-                "token": "USDC",
-                "amount": "100",
-                "nonce": nonce,
-                "timestamp": timestamp
-            }
+            "message": { "recipient": "0x1234567890123456789012345678901234567890", "token": "USDC", "amount": "100", "nonce": nonce, "timestamp": timestamp }
         });
-
         let typed: TypedData = serde_json::from_value(typed).unwrap();
         let sig = wallet.sign_typed_data(&typed).await.unwrap();
-
-        VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".into(),
-                token: "USDC".into(),
-                amount: "100".into(),
-                nonce: nonce.into(),
-                chain_id,
-                timestamp: Some(timestamp),
-            },
-            signature: format!("0x{}", hex::encode(sig.to_vec())),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_valid() {
-        let req = signed_request("nonce-1", SUPPORTED_CHAINS[0], now()).await;
-        let (status, _, Json(resp)) =
-            verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(resp.is_valid);
+        VerifyRequest { context: PaymentContext { recipient: "0x1234567890123456789012345678901234567890".into(), token: "USDC".into(), amount: "100".into(), nonce: nonce.into(), chain_id, timestamp: Some(timestamp) }, signature: format!("0x{}", hex::encode(sig.to_vec())) }
     }
 
     #[tokio::test]
     async fn test_verify_signature_rejects_unsupported_chain_id() {
         let req = signed_request("unsupported-chain", 1, now()).await;
-        let (status, _, Json(resp)) =
-            verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
-
+        let (status, _, Json(resp)) = verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(!resp.is_valid);
         assert_eq!(resp.error_code.as_deref(), Some("chain_id_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_rejects_expired_timestamp() {
+        let req = signed_request("nonce-expired", SUPPORTED_CHAINS[0], now() - 1000).await;
+        let (status, _, Json(resp)) = verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!resp.is_valid);
+        assert_eq!(resp.error_code.as_deref(), Some("timestamp_expired"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_rejects_nonce_replay() {
+        let state = app_state();
+        let req = signed_request("nonce-reuse", SUPPORTED_CHAINS[0], now()).await;
+        verify_signature(State(state.clone()), HeaderMap::new(), Ok(Json(req.clone()))).await;
+        let (status, _, Json(resp)) = verify_signature(State(state), HeaderMap::new(), Ok(Json(req))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(!resp.is_valid);
+        assert_eq!(resp.error_code.as_deref(), Some("nonce_already_used"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_handles_redis_fail_closed() {
+        let mut state = app_state();
+        state.nonce_store = Arc::new(NonceStore::Redis(RedisNonceStore { client: redis::Client::open("redis://invalid").unwrap(), key_prefix: "test:".into(), timeout: Duration::from_millis(10) }));
+        let req = signed_request("nonce-redis-fail", SUPPORTED_CHAINS[0], now()).await;
+        let (status, _, Json(resp)) = verify_signature(State(state), HeaderMap::new(), Ok(Json(req))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.error_code.as_deref(), Some("nonce_store_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_rejects_oversized_payload() {
+        let mut state = app_state();
+        state.max_body_size = 10;
+        let req = signed_request("nonce-large", SUPPORTED_CHAINS[0], now()).await;
+        let (status, _, _) = verify_signature(State(state), HeaderMap::new(), Err(JsonRejection::BytesRejection(axum::extract::rejection::BytesRejection::default()))).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
