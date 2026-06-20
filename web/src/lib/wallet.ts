@@ -1,3 +1,5 @@
+"use client";
+
 import { ethers, type Eip1193Provider } from "ethers";
 
 declare global {
@@ -28,6 +30,18 @@ const CHAINS: Record<number, ChainMeta> = {
     name: "Base",
     rpcUrl: "https://mainnet.base.org",
     explorer: "https://basescan.org",
+  },
+  11155111: {
+    id: 11155111,
+    name: "Ethereum Sepolia",
+    rpcUrl: "https://rpc.sepolia.org",
+    explorer: "https://sepolia.etherscan.io",
+  },
+  11155420: {
+    id: 11155420,
+    name: "Optimism Sepolia",
+    rpcUrl: "https://sepolia.optimism.io",
+    explorer: "https://sepolia-optimism.etherscan.io",
   },
 };
 
