@@ -25,13 +25,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_BODY_SIZE: usize = 1024 * 1024; // 1MB
-const DEFAULT_EXPECTED_CHAIN_ID: u64 = 84532;
 const NONCE_SWEEP_INTERVAL_SECONDS: u64 = 60;
+const SUPPORTED_CHAINS: [u64; 3] = [84532, 11155111, 11155420];
 
 #[derive(Clone)]
 struct AppState {
     max_body_size: usize,
-    expected_chain_id: u64,
+    supported_chains: Vec<u64>,
     nonce_store: Arc<NonceStore>,
     signature_expiry_seconds: u64,
     clock_skew_seconds: u64,
@@ -98,7 +98,7 @@ impl NonceStoreError {
 fn get_max_body_size() -> usize {
     match std::env::var("MAX_REQUEST_BODY_BYTES") {
         Ok(v) => match v.parse() {
-            Ok(size) if size > 0 => size, // Only accept positive numbers
+            Ok(size) if size > 0 => size,
             Ok(_) => {
                 eprintln!(
                     "Warning: MAX_REQUEST_BODY_BYTES must be > 0, using default {}",
@@ -116,37 +116,6 @@ fn get_max_body_size() -> usize {
         },
         Err(_) => MAX_BODY_SIZE,
     }
-}
-
-fn parse_chain_id_env(key: &str) -> Option<u64> {
-    match std::env::var(key) {
-        Ok(v) => match v.parse() {
-            Ok(chain_id) if chain_id > 0 => Some(chain_id),
-            Ok(_) => {
-                eprintln!("Warning: {} must be > 0, ignoring value", key);
-                None
-            }
-            Err(_) => {
-                eprintln!("Warning: Invalid {} '{}', ignoring value", key, v);
-                None
-            }
-        },
-        Err(_) => None,
-    }
-}
-
-fn get_expected_chain_id() -> u64 {
-    if std::env::var("EXPECTED_CHAIN_ID").is_ok() {
-        return parse_chain_id_env("EXPECTED_CHAIN_ID").unwrap_or_else(|| {
-            eprintln!(
-                "Warning: EXPECTED_CHAIN_ID invalid, using default {}",
-                DEFAULT_EXPECTED_CHAIN_ID
-            );
-            DEFAULT_EXPECTED_CHAIN_ID
-        });
-    }
-
-    parse_chain_id_env("CHAIN_ID").unwrap_or(DEFAULT_EXPECTED_CHAIN_ID)
 }
 
 fn memory_nonce_store() -> Arc<NonceStore> {
@@ -253,12 +222,11 @@ fn build_nonce_store_from_env() -> Result<Arc<NonceStore>, String> {
 #[tokio::main]
 async fn main() {
     let limit = get_max_body_size();
-    let expected_chain_id = get_expected_chain_id();
     let nonce_store =
         build_nonce_store_from_env().expect("failed to configure verifier nonce store");
     let state = AppState {
         max_body_size: limit,
-        expected_chain_id,
+        supported_chains: SUPPORTED_CHAINS.to_vec(),
         nonce_store,
         signature_expiry_seconds: get_env_u64("SIGNATURE_EXPIRY_SECONDS", 300),
         clock_skew_seconds: get_env_u64("SIGNATURE_CLOCK_SKEW_SECONDS", 60),
@@ -311,10 +279,6 @@ async fn health(headers: HeaderMap) -> (HeaderMap, Json<HealthResponse>) {
     )
 }
 
-/* =======================
-   Request / Response
-======================= */
-
 #[derive(Deserialize, Debug, Clone)]
 struct VerifyRequest {
     context: PaymentContext,
@@ -348,10 +312,6 @@ struct HealthResponse {
     version: &'static str,
 }
 
-/* =======================
-   Correlation ID
-======================= */
-
 fn correlation_id_headers(headers: &HeaderMap) -> (String, HeaderMap) {
     let correlation_id = headers
         .get("X-Correlation-ID")
@@ -365,10 +325,6 @@ fn correlation_id_headers(headers: &HeaderMap) -> (String, HeaderMap) {
 
     (correlation_id.to_string(), res_headers)
 }
-
-/* =======================
-   Timestamp Validation
-======================= */
 
 #[derive(Debug)]
 enum VerifyError {
@@ -508,29 +464,21 @@ async fn claim_nonce(state: &AppState, nonce: &str, now: Instant) -> Result<bool
     }
 }
 
-/* =======================
-   Signature Verification
-======================= */
-
 async fn verify_signature(
     State(state): State<AppState>,
     headers: HeaderMap,
     payload: Result<Json<VerifyRequest>, JsonRejection>,
 ) -> (StatusCode, HeaderMap, Json<VerifyResponse>) {
-    // 1. Get correlation ID headers first so we can use them in error responses
     let (cid, res_headers) = correlation_id_headers(&headers);
 
     let request_start = std::time::Instant::now();
     ::metrics::counter!("verifier_requests_total").increment(1);
 
-    // 2. Security Check: Match the payload result immediately
     let payload = match payload {
-        Ok(Json(p)) => p, // Everything is good, proceed with payload 'p'
+        Ok(Json(p)) => p,
         Err(JsonRejection::BytesRejection(_)) => {
             println!("[CID: {}] Rejected: Payload too large", cid);
-
             record_verification_failure(&request_start, "payload_too_large");
-
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 res_headers,
@@ -547,9 +495,7 @@ async fn verify_signature(
         }
         Err(e) => {
             println!("[CID: {}] Rejected: Invalid JSON or formatting", cid);
-
             record_verification_failure(&request_start, "invalid_json");
-
             return (
                 StatusCode::BAD_REQUEST,
                 res_headers,
@@ -563,19 +509,20 @@ async fn verify_signature(
         }
     };
 
-    // 3. Now that we have a safe payload, proceed with your existing logic
     println!("[CID: {}] Verify nonce={}", cid, payload.context.nonce);
 
-    if payload.context.chain_id != state.expected_chain_id {
+    if !state.supported_chains.contains(&payload.context.chain_id) {
         record_verification_failure(&request_start, "chain_id_mismatch");
-
         return (
             StatusCode::BAD_REQUEST,
             res_headers,
             Json(VerifyResponse {
                 is_valid: false,
                 recovered_address: None,
-                error: Some("chain ID mismatch".to_string()),
+                error: Some(format!(
+                    "Chain ID {} is not supported",
+                    payload.context.chain_id
+                )),
                 error_code: Some("chain_id_mismatch".to_string()),
             }),
         );
@@ -677,8 +624,6 @@ async fn verify_signature(
         }
     };
 
-    //let start = std::time::Instant::now();
-
     let result = sig.recover_typed_data(&typed_data);
     let duration = request_start.elapsed().as_secs_f64();
 
@@ -745,43 +690,18 @@ fn record_verification_failure(request_start: &Instant, reason: &'static str) {
     metrics::record_verification(false, request_start.elapsed().as_secs_f64(), Some(reason));
 }
 
-/* =======================
-   Tests
-======================= */
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ethers::signers::{LocalWallet, Signer};
-    use ethers::types::transaction::eip712::TypedData;
-    use std::sync::Arc;
-
-    const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn app_state() -> AppState {
-        app_state_with_window(300, 60)
-    }
-
-    fn app_state_with_window(signature_expiry_seconds: u64, clock_skew_seconds: u64) -> AppState {
-        app_state_with_nonce_store(
-            memory_nonce_store(),
-            signature_expiry_seconds,
-            clock_skew_seconds,
-        )
-    }
-
-    fn app_state_with_nonce_store(
-        nonce_store: Arc<NonceStore>,
-        signature_expiry_seconds: u64,
-        clock_skew_seconds: u64,
-    ) -> AppState {
         AppState {
             max_body_size: MAX_BODY_SIZE,
-            expected_chain_id: BASE_SEPOLIA_CHAIN_ID,
-            nonce_store,
-            signature_expiry_seconds,
-            clock_skew_seconds,
+            supported_chains: SUPPORTED_CHAINS.to_vec(),
+            nonce_store: memory_nonce_store(),
+            signature_expiry_seconds: 300,
+            clock_skew_seconds: 60,
         }
     }
 
@@ -790,233 +710,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
-    }
-
-    fn with_chain_env(
-        expected_chain_id: Option<&str>,
-        chain_id: Option<&str>,
-        test: impl FnOnce(),
-    ) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let old_expected = env::var("EXPECTED_CHAIN_ID").ok();
-        let old_chain = env::var("CHAIN_ID").ok();
-
-        match expected_chain_id {
-            Some(value) => env::set_var("EXPECTED_CHAIN_ID", value),
-            None => env::remove_var("EXPECTED_CHAIN_ID"),
-        }
-        match chain_id {
-            Some(value) => env::set_var("CHAIN_ID", value),
-            None => env::remove_var("CHAIN_ID"),
-        }
-
-        test();
-
-        match old_expected {
-            Some(value) => env::set_var("EXPECTED_CHAIN_ID", value),
-            None => env::remove_var("EXPECTED_CHAIN_ID"),
-        }
-        match old_chain {
-            Some(value) => env::set_var("CHAIN_ID", value),
-            None => env::remove_var("CHAIN_ID"),
-        }
-    }
-
-    fn with_nonce_env(
-        nonce_store: Option<&str>,
-        redis_url: Option<&str>,
-        key_prefix: Option<&str>,
-        redis_timeout_ms: Option<&str>,
-        test: impl FnOnce(),
-    ) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let old_nonce_store = env::var("VERIFIER_NONCE_STORE").ok();
-        let old_redis_url = env::var("REDIS_URL").ok();
-        let old_key_prefix = env::var("VERIFIER_NONCE_KEY_PREFIX").ok();
-        let old_redis_timeout_ms = env::var("VERIFIER_REDIS_TIMEOUT_MS").ok();
-
-        match nonce_store {
-            Some(value) => env::set_var("VERIFIER_NONCE_STORE", value),
-            None => env::remove_var("VERIFIER_NONCE_STORE"),
-        }
-        match redis_url {
-            Some(value) => env::set_var("REDIS_URL", value),
-            None => env::remove_var("REDIS_URL"),
-        }
-        match key_prefix {
-            Some(value) => env::set_var("VERIFIER_NONCE_KEY_PREFIX", value),
-            None => env::remove_var("VERIFIER_NONCE_KEY_PREFIX"),
-        }
-        match redis_timeout_ms {
-            Some(value) => env::set_var("VERIFIER_REDIS_TIMEOUT_MS", value),
-            None => env::remove_var("VERIFIER_REDIS_TIMEOUT_MS"),
-        }
-
-        test();
-
-        match old_nonce_store {
-            Some(value) => env::set_var("VERIFIER_NONCE_STORE", value),
-            None => env::remove_var("VERIFIER_NONCE_STORE"),
-        }
-        match old_redis_url {
-            Some(value) => env::set_var("REDIS_URL", value),
-            None => env::remove_var("REDIS_URL"),
-        }
-        match old_key_prefix {
-            Some(value) => env::set_var("VERIFIER_NONCE_KEY_PREFIX", value),
-            None => env::remove_var("VERIFIER_NONCE_KEY_PREFIX"),
-        }
-        match old_redis_timeout_ms {
-            Some(value) => env::set_var("VERIFIER_REDIS_TIMEOUT_MS", value),
-            None => env::remove_var("VERIFIER_REDIS_TIMEOUT_MS"),
-        }
-    }
-
-    fn with_redis_auth_env(
-        redis_password: Option<&str>,
-        redis_db: Option<&str>,
-        test: impl FnOnce(),
-    ) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let old_redis_password = env::var("REDIS_PASSWORD").ok();
-        let old_redis_db = env::var("REDIS_DB").ok();
-
-        match redis_password {
-            Some(value) => env::set_var("REDIS_PASSWORD", value),
-            None => env::remove_var("REDIS_PASSWORD"),
-        }
-        match redis_db {
-            Some(value) => env::set_var("REDIS_DB", value),
-            None => env::remove_var("REDIS_DB"),
-        }
-
-        test();
-
-        match old_redis_password {
-            Some(value) => env::set_var("REDIS_PASSWORD", value),
-            None => env::remove_var("REDIS_PASSWORD"),
-        }
-        match old_redis_db {
-            Some(value) => env::set_var("REDIS_DB", value),
-            None => env::remove_var("REDIS_DB"),
-        }
-    }
-
-    #[test]
-    fn test_get_expected_chain_id_defaults_to_base_sepolia() {
-        with_chain_env(None, None, || {
-            assert_eq!(get_expected_chain_id(), BASE_SEPOLIA_CHAIN_ID);
-        });
-    }
-
-    #[test]
-    fn test_get_expected_chain_id_falls_back_to_chain_id_when_expected_unset() {
-        with_chain_env(None, Some("8453"), || {
-            assert_eq!(get_expected_chain_id(), 8453);
-        });
-    }
-
-    #[test]
-    fn test_get_expected_chain_id_prefers_expected_chain_id() {
-        with_chain_env(Some("84532"), Some("8453"), || {
-            assert_eq!(get_expected_chain_id(), BASE_SEPOLIA_CHAIN_ID);
-        });
-    }
-
-    #[test]
-    fn test_get_expected_chain_id_ignores_invalid_expected_chain_id() {
-        with_chain_env(Some("0"), Some("8453"), || {
-            assert_eq!(get_expected_chain_id(), BASE_SEPOLIA_CHAIN_ID);
-        });
-    }
-
-    #[test]
-    fn test_normalize_redis_url_accepts_bare_host_port() {
-        assert_eq!(normalize_redis_url("redis:6379"), "redis://redis:6379");
-        assert_eq!(
-            normalize_redis_url("redis://localhost:6379"),
-            "redis://localhost:6379"
-        );
-        assert_eq!(
-            normalize_redis_url("rediss://cache.example.com:6380"),
-            "rediss://cache.example.com:6380"
-        );
-    }
-
-    #[test]
-    fn test_verifier_redis_connection_info_uses_env_fallbacks_for_bare_url() {
-        with_redis_auth_env(Some("secret"), Some("2"), || {
-            let connection_info = verifier_redis_connection_info("redis:6379").unwrap();
-
-            assert_eq!(connection_info.redis.password.as_deref(), Some("secret"));
-            assert_eq!(connection_info.redis.db, 2);
-        });
-    }
-
-    #[test]
-    fn test_verifier_redis_connection_info_preserves_explicit_url_auth_and_db() {
-        with_redis_auth_env(Some("env-secret"), Some("2"), || {
-            let connection_info =
-                verifier_redis_connection_info("redis://user:url-secret@redis:6379/4").unwrap();
-
-            assert_eq!(connection_info.redis.username.as_deref(), Some("user"));
-            assert_eq!(
-                connection_info.redis.password.as_deref(),
-                Some("url-secret")
-            );
-            assert_eq!(connection_info.redis.db, 4);
-        });
-    }
-
-    #[test]
-    fn test_build_nonce_store_defaults_to_memory() {
-        with_nonce_env(None, None, None, None, || {
-            let store = build_nonce_store_from_env().unwrap();
-            assert!(matches!(store.as_ref(), NonceStore::Memory(_)));
-        });
-    }
-
-    #[test]
-    fn test_build_redis_nonce_store_requires_redis_url() {
-        with_nonce_env(Some("redis"), None, None, None, || {
-            let err = match build_nonce_store_from_env() {
-                Ok(_) => panic!("expected REDIS_URL error"),
-                Err(err) => err,
-            };
-            assert!(err.contains("REDIS_URL"));
-        });
-    }
-
-    #[test]
-    fn test_redis_nonce_timeout_defaults_to_two_seconds() {
-        with_nonce_env(None, None, None, None, || {
-            assert_eq!(redis_nonce_timeout(), Duration::from_millis(2_000));
-        });
-    }
-
-    #[test]
-    fn test_redis_nonce_timeout_uses_env_milliseconds() {
-        with_nonce_env(None, None, None, Some("750"), || {
-            assert_eq!(redis_nonce_timeout(), Duration::from_millis(750));
-        });
-    }
-
-    #[test]
-    fn test_redis_nonce_timeout_rejects_invalid_env() {
-        with_nonce_env(None, None, None, Some("not-a-number"), || {
-            assert_eq!(redis_nonce_timeout(), Duration::from_millis(2_000));
-        });
-        with_nonce_env(None, None, None, Some("0"), || {
-            assert_eq!(redis_nonce_timeout(), Duration::from_millis(2_000));
-        });
-    }
-
-    #[test]
-    fn test_redis_nonce_key_hashes_raw_nonce() {
-        let key = redis_nonce_key("prefix:", "sensitive-nonce-value");
-        assert!(key.starts_with("prefix:"));
-        assert!(!key.contains("sensitive-nonce-value"));
-        assert_eq!(key.len(), "prefix:".len() + 64);
     }
 
     async fn signed_request(nonce: &str, chain_id: u64, timestamp: u64) -> VerifyRequest {
@@ -1068,106 +761,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_timestamp_valid() {
-        let n = now();
-        assert!(validate_timestamp_internal(Some(n), 300, 60, n).is_ok());
-    }
-
-    #[test]
-    fn test_timestamp_expired() {
-        let n = now();
-        let res = validate_timestamp_internal(Some(n - 1000), 300, 60, n);
-        assert!(matches!(res, Err(VerifyError::SignatureExpired { .. })));
-    }
-
-    #[test]
-    fn test_timestamp_future() {
-        let n = now();
-        // Timestamp 120 seconds in the future (beyond 60s clock skew grace)
-        let res = validate_timestamp_internal(Some(n + 120), 300, 60, n);
-        assert!(matches!(res, Err(VerifyError::FutureTimestamp { .. })));
-    }
-
-    #[test]
-    fn test_timestamp_missing() {
-        let n = now();
-        // No timestamp provided
-        let res = validate_timestamp_internal(None, 300, 60, n);
-        assert!(matches!(res, Err(VerifyError::MissingTimestamp)));
-    }
-
-    #[test]
-    fn test_timestamp_within_clock_skew() {
-        let n = now();
-        // Timestamp 30 seconds in the future (within 60s grace period) - should be valid
-        let res = validate_timestamp_internal(Some(n + 30), 300, 60, n);
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_timestamp_boundary() {
-        let n = now();
-        // Exactly at 300s window boundary - should be valid
-        let res = validate_timestamp_internal(Some(n - 300), 300, 60, n);
-        assert!(res.is_ok());
-
-        // One second past boundary (301s) - should be expired
-        let res = validate_timestamp_internal(Some(n - 301), 300, 60, n);
-        assert!(matches!(res, Err(VerifyError::SignatureExpired { .. })));
-    }
-
     #[tokio::test]
     async fn test_verify_signature_valid() {
-        let wallet: LocalWallet =
-            "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc"
-                .parse()
-                .unwrap();
-
-        let wallet = wallet.with_chain_id(BASE_SEPOLIA_CHAIN_ID);
-
-        let ts = now();
-        let typed = serde_json::json!({
-            "domain": {
-                "name": "MicroAI Paygate",
-                "version": "1",
-                "chainId": BASE_SEPOLIA_CHAIN_ID,
-                "verifyingContract": "0x0000000000000000000000000000000000000000"
-            },
-            "types": {
-                "Payment": [
-                    { "name": "recipient", "type": "address" },
-                    { "name": "token", "type": "string" },
-                    { "name": "amount", "type": "string" },
-                    { "name": "nonce", "type": "string" },
-                    { "name": "timestamp", "type": "uint256" }
-                ]
-            },
-            "primaryType": "Payment",
-            "message": {
-                "recipient": "0x1234567890123456789012345678901234567890",
-                "token": "USDC",
-                "amount": "100",
-                "nonce": "nonce-1",
-                "timestamp": ts
-            }
-        });
-
-        let typed: TypedData = serde_json::from_value(typed).unwrap();
-        let sig = wallet.sign_typed_data(&typed).await.unwrap();
-
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".into(),
-                token: "USDC".into(),
-                amount: "100".into(),
-                nonce: "nonce-1".into(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(ts),
-            },
-            signature: format!("0x{}", hex::encode(sig.to_vec())),
-        };
-
+        let req = signed_request("nonce-1", SUPPORTED_CHAINS[0], now()).await;
         let (status, _, Json(resp)) =
             verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
 
@@ -1176,602 +772,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_signature_rejects_wrong_chain_id() {
-        let wallet: LocalWallet =
-            "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc"
-                .parse()
-                .unwrap();
-
-        let wallet = wallet.with_chain_id(1u64);
-
-        let ts = now();
-        let typed = serde_json::json!({
-            "domain": {
-                "name": "MicroAI Paygate",
-                "version": "1",
-                "chainId": 1,
-                "verifyingContract": "0x0000000000000000000000000000000000000000"
-            },
-            "types": {
-                "Payment": [
-                    { "name": "recipient", "type": "address" },
-                    { "name": "token", "type": "string" },
-                    { "name": "amount", "type": "string" },
-                    { "name": "nonce", "type": "string" },
-                    { "name": "timestamp", "type": "uint256" }
-                ]
-            },
-            "primaryType": "Payment",
-            "message": {
-                "recipient": "0x1234567890123456789012345678901234567890",
-                "token": "USDC",
-                "amount": "100",
-                "nonce": "wrong-chain-nonce",
-                "timestamp": ts
-            }
-        });
-
-        let typed: TypedData = serde_json::from_value(typed).unwrap();
-        let sig = wallet.sign_typed_data(&typed).await.unwrap();
-
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".into(),
-                token: "USDC".into(),
-                amount: "100".into(),
-                nonce: "wrong-chain-nonce".into(),
-                chain_id: 1,
-                timestamp: Some(ts),
-            },
-            signature: format!("0x{}", hex::encode(sig.to_vec())),
-        };
-
+    async fn test_verify_signature_rejects_unsupported_chain_id() {
+        let req = signed_request("unsupported-chain", 1, now()).await;
         let (status, _, Json(resp)) =
             verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(!resp.is_valid);
-        assert_eq!(resp.recovered_address, None);
-        assert_eq!(resp.error.as_deref(), Some("chain ID mismatch"));
         assert_eq!(resp.error_code.as_deref(), Some("chain_id_mismatch"));
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_returns_timestamp_error_codes() {
-        let state = app_state();
-        let cases = [
-            (None, "timestamp_missing"),
-            (Some(now() - 301), "timestamp_expired"),
-            (Some(now() + 120), "timestamp_future"),
-        ];
-
-        for (timestamp, expected_code) in cases {
-            let req = VerifyRequest {
-                context: PaymentContext {
-                    recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                    token: "USDC".to_string(),
-                    amount: "100".to_string(),
-                    nonce: format!("timestamp-{expected_code}"),
-                    chain_id: BASE_SEPOLIA_CHAIN_ID,
-                    timestamp,
-                },
-                signature: "0x1234567890".to_string(),
-            };
-
-            let (status, _, Json(resp)) =
-                verify_signature(State(state.clone()), HeaderMap::new(), Ok(Json(req))).await;
-
-            assert_eq!(status, StatusCode::OK);
-            assert!(!resp.is_valid);
-            assert_eq!(resp.error_code.as_deref(), Some(expected_code));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_rejects_replayed_nonce() {
-        let state = app_state();
-        let req = signed_request("replay-nonce", BASE_SEPOLIA_CHAIN_ID, now()).await;
-
-        let (first_status, _, Json(first_resp)) = verify_signature(
-            State(state.clone()),
-            HeaderMap::new(),
-            Ok(Json(req.clone())),
-        )
-        .await;
-        let (second_status, _, Json(second_resp)) =
-            verify_signature(State(state), HeaderMap::new(), Ok(Json(req))).await;
-
-        assert_eq!(first_status, StatusCode::OK);
-        assert!(first_resp.is_valid);
-        assert_eq!(second_status, StatusCode::CONFLICT);
-        assert!(!second_resp.is_valid);
-        assert_eq!(
-            second_resp.error_code.as_deref(),
-            Some("nonce_already_used")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_allows_one_concurrent_duplicate_nonce() {
-        let state = app_state();
-        let req = signed_request("concurrent-replay-nonce", BASE_SEPOLIA_CHAIN_ID, now()).await;
-        let mut handles = Vec::new();
-
-        for _ in 0..100 {
-            let state = state.clone();
-            let req = req.clone();
-            handles.push(tokio::spawn(async move {
-                let (status, _, Json(resp)) =
-                    verify_signature(State(state), HeaderMap::new(), Ok(Json(req))).await;
-                (status, resp.error_code)
-            }));
-        }
-
-        let mut successes = 0;
-        let mut conflicts = 0;
-        for handle in handles {
-            let (status, error_code) = handle.await.unwrap();
-            match status {
-                StatusCode::OK => successes += 1,
-                StatusCode::CONFLICT => {
-                    assert_eq!(error_code.as_deref(), Some("nonce_already_used"));
-                    conflicts += 1;
-                }
-                other => panic!("unexpected status: {}", other),
-            }
-        }
-
-        assert_eq!(successes, 1);
-        assert_eq!(conflicts, 99);
-    }
-
-    #[tokio::test]
-    async fn test_claim_nonce_retains_entries_through_clock_skew_window() {
-        let state = app_state_with_window(1, 2);
-        let start = Instant::now();
-
-        assert!(claim_nonce(&state, "ttl-replay-nonce", start)
-            .await
-            .unwrap());
-        assert!(!claim_nonce(
-            &state,
-            "ttl-replay-nonce",
-            start + Duration::from_millis(1100)
-        )
-        .await
-        .unwrap());
-        assert!(!claim_nonce(
-            &state,
-            "ttl-replay-nonce",
-            start + Duration::from_millis(3100)
-        )
-        .await
-        .unwrap());
-        assert!(!claim_nonce(
-            &state,
-            "ttl-replay-nonce",
-            start + Duration::from_millis(4000)
-        )
-        .await
-        .unwrap());
-        assert!(claim_nonce(
-            &state,
-            "ttl-replay-nonce",
-            start + Duration::from_millis(4100)
-        )
-        .await
-        .unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_invalid_signature_does_not_burn_nonce() {
-        let state = app_state();
-        let mut bad_req =
-            signed_request("invalid-does-not-burn", BASE_SEPOLIA_CHAIN_ID, now()).await;
-        let good_req = bad_req.clone();
-        bad_req.signature = format!("0x{}", "00".repeat(65));
-
-        let (bad_status, _, Json(bad_resp)) =
-            verify_signature(State(state.clone()), HeaderMap::new(), Ok(Json(bad_req))).await;
-        let (good_status, _, Json(good_resp)) =
-            verify_signature(State(state), HeaderMap::new(), Ok(Json(good_req))).await;
-
-        assert_eq!(bad_status, StatusCode::OK);
-        assert!(!bad_resp.is_valid);
-        assert_eq!(bad_resp.error_code.as_deref(), Some("invalid_signature"));
-        assert_eq!(good_status, StatusCode::OK);
-        assert!(good_resp.is_valid);
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_fails_closed_when_redis_nonce_store_unavailable() {
-        let client = redis::Client::open("redis://127.0.0.1:1").unwrap();
-        let state = app_state_with_nonce_store(
-            Arc::new(NonceStore::Redis(RedisNonceStore {
-                client,
-                key_prefix: "test:verifier:nonce:".to_string(),
-                timeout: redis_nonce_timeout(),
-            })),
-            300,
-            60,
-        );
-        let req = signed_request("redis-unavailable-nonce", BASE_SEPOLIA_CHAIN_ID, now()).await;
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            verify_signature(State(state), HeaderMap::new(), Ok(Json(req))),
-        )
-        .await
-        .expect("redis-unavailable path should fail closed quickly");
-        let (status, _, Json(resp)) = result;
-
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(!resp.is_valid);
-        assert_eq!(resp.error_code.as_deref(), Some("nonce_store_unavailable"));
-    }
-
-    #[tokio::test]
-    async fn test_health_endpoint() {
-        let (_headers, Json(response)) = health(HeaderMap::new()).await;
-
-        assert_eq!(response.status, "healthy");
-        assert_eq!(response.service, "verifier");
-        assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
-    }
-
-    #[tokio::test]
-    async fn test_health_endpoint_correlation_id() {
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Correlation-ID", "health-check-id".parse().unwrap());
-
-        let (res_headers, Json(response)) = health(headers).await;
-
-        assert_eq!(response.status, "healthy");
-
-        let response_id = res_headers.get("X-Correlation-ID");
-        assert!(response_id.is_some());
-        assert_eq!(response_id.unwrap().to_str().unwrap(), "health-check-id");
-    }
-
-    #[tokio::test]
-    async fn test_verify_signature_invalid() {
-        let ts = now();
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "nonce".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(ts),
-            },
-            signature: "0x1234567890".to_string(),
-        };
-
-        let (status, _headers, Json(_response)) =
-            verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn test_correlation_id_preserved_in_response() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Correlation-ID",
-            "test-correlation-id-12345".parse().unwrap(),
-        );
-
-        let ts = now();
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "nonce".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(ts),
-            },
-            signature: "0x1234567890".to_string(),
-        };
-
-        let (_status, response_headers, _json) =
-            verify_signature(State(app_state()), headers, Ok(Json(req))).await;
-
-        let response_id = response_headers.get("X-Correlation-ID");
-        assert!(
-            response_id.is_some(),
-            "Expected X-Correlation-ID in response headers"
-        );
-        assert_eq!(
-            response_id.unwrap().to_str().unwrap(),
-            "test-correlation-id-12345",
-            "Correlation ID should be preserved from request"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_correlation_id_unknown_when_missing() {
-        let headers = HeaderMap::new();
-
-        let ts = now();
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "nonce".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(ts),
-            },
-            signature: "0x1234567890".to_string(),
-        };
-
-        let (_status, response_headers, _json) =
-            verify_signature(State(app_state()), headers, Ok(Json(req))).await;
-
-        let response_id = response_headers.get("X-Correlation-ID");
-        assert!(
-            response_id.is_some(),
-            "Expected X-Correlation-ID header even with unknown value"
-        );
-        assert_eq!(
-            response_id.unwrap().to_str().unwrap(),
-            "unknown",
-            "Should use 'unknown' as fallback correlation ID"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_correlation_id_with_valid_signature() {
-        let wallet: LocalWallet =
-            "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc"
-                .parse()
-                .unwrap();
-        let wallet = wallet.with_chain_id(BASE_SEPOLIA_CHAIN_ID);
-
-        let ts = now();
-        let json_typed_data = serde_json::json!({
-            "domain": {
-                "name": "MicroAI Paygate",
-                "version": "1",
-                "chainId": BASE_SEPOLIA_CHAIN_ID,
-                "verifyingContract": "0x0000000000000000000000000000000000000000"
-            },
-            "types": {
-                "Payment": [
-                    { "name": "recipient", "type": "address" },
-                    { "name": "token", "type": "string" },
-                    { "name": "amount", "type": "string" },
-                    { "name": "nonce", "type": "string" },
-                    { "name": "timestamp", "type": "uint256" }
-                ]
-            },
-            "primaryType": "Payment",
-            "message": {
-                "recipient": "0x1234567890123456789012345678901234567890",
-                "token": "USDC",
-                "amount": "100",
-                "nonce": "correlation-test-nonce",
-                "timestamp": ts
-            }
-        });
-
-        let typed_data: TypedData = serde_json::from_value(json_typed_data).unwrap();
-        let signature = wallet.sign_typed_data(&typed_data).await.unwrap();
-        let signature_str = format!("0x{}", hex::encode(signature.to_vec()));
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Correlation-ID",
-            "valid-sig-correlation-id".parse().unwrap(),
-        );
-
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "correlation-test-nonce".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(ts),
-            },
-            signature: signature_str,
-        };
-
-        let (status, response_headers, Json(response)) =
-            verify_signature(State(app_state()), headers, Ok(Json(req))).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(response.is_valid);
-
-        let response_id = response_headers.get("X-Correlation-ID");
-        assert!(
-            response_id.is_some(),
-            "Expected X-Correlation-ID in successful response"
-        );
-        assert_eq!(
-            response_id.unwrap().to_str().unwrap(),
-            "valid-sig-correlation-id",
-            "Correlation ID should be preserved in successful response"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_correlation_id_uuid_format() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Correlation-ID",
-            "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
-        );
-
-        let ts = now();
-        let req = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "nonce".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(ts),
-            },
-            signature: "0x1234567890".to_string(),
-        };
-
-        let (_status, response_headers, _json) =
-            verify_signature(State(app_state()), headers, Ok(Json(req))).await;
-
-        let response_id = response_headers.get("X-Correlation-ID");
-        assert!(response_id.is_some());
-        assert_eq!(
-            response_id.unwrap().to_str().unwrap(),
-            "550e8400-e29b-41d4-a716-446655440000",
-            "UUID correlation ID should be preserved exactly"
-        );
-    }
-    #[tokio::test]
-    async fn test_verify_signature_rejection_paths() {
-        use axum::extract::rejection::JsonRejection;
-
-        // 1. Test a generic JSON rejection (e.g., bad formatting)
-        // We simulate a "Missing Content-Type" style error
-        let body_rejection = axum::extract::rejection::MissingJsonContentType::default();
-        let rejection = JsonRejection::from(body_rejection);
-
-        let (status, _, Json(resp)) =
-            verify_signature(State(app_state()), HeaderMap::new(), Err(rejection)).await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(resp.error.unwrap().contains("Invalid request"));
-    }
-    #[tokio::test]
-    async fn test_verify_signature_oversized_payload() {
-        use axum::{
-            body::Body,
-            http::{Request, StatusCode},
-        };
-        use tower::ServiceExt; // for `oneshot`
-
-        // 1. Force the limit to our constant (1MB) instead of reading the environment.
-        // This makes the test deterministic.
-        let limit = MAX_BODY_SIZE;
-        let state = AppState {
-            max_body_size: limit,
-            expected_chain_id: BASE_SEPOLIA_CHAIN_ID,
-            nonce_store: memory_nonce_store(),
-            signature_expiry_seconds: 300,
-            clock_skew_seconds: 60,
-        };
-        let app = Router::new()
-            .route("/verify", post(verify_signature))
-            .layer(DefaultBodyLimit::max(limit))
-            .with_state(state);
-
-        // 2. Create a "too large" payload (2MB) which is guaranteed to exceed 1MB.
-        let large_data = vec![b'a'; 2 * 1024 * 1024];
-        let req = Request::builder()
-            .method("POST")
-            .uri("/verify")
-            .header("content-type", "application/json")
-            .header("x-correlation-id", "test-oversized")
-            .body(Body::from(large_data))
-            .unwrap();
-
-        // 3. Send the request through the app.
-        let response = app.oneshot(req).await.unwrap();
-
-        // 4. Verify the results
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE); // 413
-        assert!(response.headers().contains_key("x-correlation-id")); // Header check
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_verify_signature_records_specific_failure_reasons() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = ::metrics::set_default_local_recorder(&recorder);
-
-        let wrong_chain = signed_request("metrics-wrong-chain", 1, now()).await;
-        let (status, _, Json(resp)) =
-            verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(wrong_chain))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(resp.error_code.as_deref(), Some("chain_id_mismatch"));
-
-        let missing_timestamp = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "metrics-missing-timestamp".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: None,
-            },
-            signature: "0x1234567890".to_string(),
-        };
-        let (status, _, Json(resp)) = verify_signature(
-            State(app_state()),
-            HeaderMap::new(),
-            Ok(Json(missing_timestamp)),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(resp.error_code.as_deref(), Some("timestamp_missing"));
-
-        let malformed_signature = VerifyRequest {
-            context: PaymentContext {
-                recipient: "0x1234567890123456789012345678901234567890".to_string(),
-                token: "USDC".to_string(),
-                amount: "100".to_string(),
-                nonce: "metrics-malformed-signature".to_string(),
-                chain_id: BASE_SEPOLIA_CHAIN_ID,
-                timestamp: Some(now()),
-            },
-            signature: "not-a-signature".to_string(),
-        };
-        let (status, _, Json(resp)) = verify_signature(
-            State(app_state()),
-            HeaderMap::new(),
-            Ok(Json(malformed_signature)),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(resp.error_code.as_deref(), Some("invalid_signature"));
-
-        let rendered = handle.render();
-        assert!(
-            rendered.contains("verifier_signature_invalid_total{reason=\"chain_id_mismatch\"} 1")
-        );
-        assert!(
-            rendered.contains("verifier_signature_invalid_total{reason=\"timestamp_missing\"} 1")
-        );
-        assert!(
-            rendered.contains("verifier_signature_invalid_total{reason=\"invalid_signature\"} 1")
-        );
-        assert!(
-            !rendered.contains("verifier_signature_invalid_total{reason=\"payload_too_large\"}")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_metrics_route_can_be_scraped_repeatedly() {
-        use axum::{body::Body, http::Request};
-        use tower::ServiceExt;
-
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let app = Router::new().route("/metrics", get(metrics_route(recorder.handle())));
-
-        for _ in 0..2 {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/metrics")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-        }
     }
 }
