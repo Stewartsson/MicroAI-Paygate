@@ -55,14 +55,14 @@ export function ReceiptHistory() {
   }, []);
 
   /**
-   * Constructs the EIP-712 domain separator using the metadata frame.
-   * Parses the chainId dynamically from the receipt's metadata context.
+   * Constructs the EIP-712 domain separator using the mandatory contract metadata.
+   * Aligns with MicroAI Paygate signature parameters.
    */
   const getDomainSeparator = (receipt: any) => ({
-    name: "PaymentGateway",
+    name: "MicroAI Paygate",
     version: "1",
-    chainId: Number(receipt.metadata?.chainId || 84532), // Defaults to Base Sepolia if unset
-    verifyingContract: receipt.metadata?.verifyingContract,
+    chainId: Number(receipt.metadata?.chainId || 84532),
+    verifyingContract: "0x0000000000000000000000000000000000000000",
   });
 
   if (entries.length === 0) {
@@ -87,8 +87,6 @@ export function ReceiptHistory() {
             signed={entry.receipt}
             savedAt={entry.savedAt}
             promptPreview={entry.promptPreview}
-            // Domain separator can now be passed or utilized via context 
-            // derived from entry.receipt.metadata via getDomainSeparator
           />
         ))}
       </ul>
