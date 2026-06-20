@@ -371,6 +371,12 @@ components:
         chainId:
           type: integer
           example: 84532
+        supportedChainIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+          description: List of supported blockchain network chain IDs for this payment challenge context.
         timestamp:
           type: integer
           format: uint64
