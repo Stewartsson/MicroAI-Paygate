@@ -54,6 +54,17 @@ export function ReceiptHistory() {
     return () => observer.disconnect();
   }, []);
 
+  /**
+   * Constructs the EIP-712 domain separator using the metadata frame.
+   * Parses the chainId dynamically from the receipt's metadata context.
+   */
+  const getDomainSeparator = (receipt: any) => ({
+    name: "PaymentGateway",
+    version: "1",
+    chainId: Number(receipt.metadata?.chainId || 84532), // Defaults to Base Sepolia if unset
+    verifyingContract: receipt.metadata?.verifyingContract,
+  });
+
   if (entries.length === 0) {
     return (
       <div ref={rootRef} className="border border-dashed border-ink-faint bg-paper p-10 text-center">
@@ -76,6 +87,8 @@ export function ReceiptHistory() {
             signed={entry.receipt}
             savedAt={entry.savedAt}
             promptPreview={entry.promptPreview}
+            // Domain separator can now be passed or utilized via context 
+            // derived from entry.receipt.metadata via getDomainSeparator
           />
         ))}
       </ul>
