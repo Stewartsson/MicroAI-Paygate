@@ -16,6 +16,10 @@ const (
 	receiptStoreModeMemory = "memory"
 )
 
+// SupportedChainIDs defines the network IDs allowed for payment requests.
+// 84532: Base Sepolia, 11155111: Ethereum Sepolia, 11155420: Optimism Sepolia.
+var SupportedChainIDs = []int64{84532, 11155111, 11155420}
+
 func getAllowedOrigins() []string {
 	raw := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
 	if raw == "" {
@@ -87,7 +91,7 @@ func getPositiveTimeout(envKey string, defaultSeconds int) time.Duration {
 }
 
 // Timeout helpers (configurable via env vars)
-func getRequestTimeout() time.Duration  { return getPositiveTimeout("REQUEST_TIMEOUT_SECONDS", 60) }
+func getRequestTimeout() time.Duration { return getPositiveTimeout("REQUEST_TIMEOUT_SECONDS", 60) }
 func getAITimeout() time.Duration       { return getPositiveTimeout("AI_REQUEST_TIMEOUT_SECONDS", 30) }
 func getVerifierTimeout() time.Duration { return getPositiveTimeout("VERIFIER_TIMEOUT_SECONDS", 2) }
 func getHealthCheckTimeout() time.Duration {
