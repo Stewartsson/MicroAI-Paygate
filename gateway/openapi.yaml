@@ -352,7 +352,7 @@ components:
 
     PaymentContext:
       type: object
-      required: [recipient, token, amount, nonce, chainId, timestamp]
+      required: [recipient, token, amount, nonce, chainId, supportedChainIds, timestamp]
       properties:
         recipient:
           type: string
@@ -462,7 +462,7 @@ components:
           format: date-time
         payment:
           type: object
-          required: [payer, recipient, amount, token, chainId, nonce]
+          required: [payer, recipient, amount, token, chainId, supportedChainIds, nonce]
           properties:
             payer:
               type: string
@@ -484,7 +484,7 @@ components:
               items:
                 type: integer
                 format: int64
-              description: Global registry of multi-chain network identifiers supported by the payment gateway runtime.
+              description: List of supported blockchain network chain IDs for this payment challenge context.
             nonce:
               type: string
               example: "550e8400-e29b-41d4-a716-446655440000"
