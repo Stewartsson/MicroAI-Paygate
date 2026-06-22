@@ -1,5 +1,5 @@
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::rejection::{JsonRejection, DefaultBodyLimit};
+use axum::extract::{State, FromRequestParts};
 use axum::{
     extract::Json,
     http::{HeaderMap, StatusCode},
@@ -292,11 +292,19 @@ async fn claim_nonce(state: &AppState, nonce: &str, now: Instant) -> Result<bool
     }
 }
 
+fn handle_rejection(err: JsonRejection, res_headers: HeaderMap) -> (StatusCode, HeaderMap, Json<VerifyResponse>) {
+    let (status, msg, code) = match err {
+        JsonRejection::BytesRejection(_) => (StatusCode::PAYLOAD_TOO_LARGE, "Payload too large", "payload_too_large"),
+        _ => (StatusCode::BAD_REQUEST, "Invalid JSON payload", "invalid_payload"),
+    };
+    (status, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(msg.into()), error_code: Some(code.into()) }))
+}
+
 async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, payload: Result<Json<VerifyRequest>, JsonRejection>) -> (StatusCode, HeaderMap, Json<VerifyResponse>) {
     let (cid, res_headers) = correlation_id_headers(&headers);
     let payload = match payload {
         Ok(Json(p)) => p,
-        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid request body".into()), error_code: Some("invalid_payload".into()) })),
+        Err(e) => return handle_rejection(e, res_headers),
     };
 
     if !state.supported_chains.contains(&payload.context.chain_id) {
