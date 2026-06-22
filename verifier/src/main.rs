@@ -1,5 +1,5 @@
 use axum::extract::rejection::{JsonRejection, DefaultBodyLimit};
-use axum::extract::{State, FromRequestParts};
+use axum::extract::{State};
 use axum::{
     extract::Json,
     http::{HeaderMap, StatusCode},
@@ -9,14 +9,10 @@ use axum::{
 use dashmap::{mapref::entry::Entry, DashMap};
 use ethers::types::transaction::eip712::TypedData;
 use ethers::types::Signature;
-
 use ethers::utils::keccak256;
-
 mod metrics;
-
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use redis::AsyncCommands;
-
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::net::SocketAddr;
@@ -67,43 +63,24 @@ impl Clone for NonceStore {
 }
 
 #[derive(Debug)]
-struct NonceStoreError {
-    message: String,
-}
+struct NonceStoreError { message: String }
 
 impl std::fmt::Display for NonceStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.message) }
 }
 
 impl std::error::Error for NonceStoreError {}
 
 impl From<redis::RedisError> for NonceStoreError {
-    fn from(err: redis::RedisError) -> Self {
-        Self {
-            message: format!("redis nonce store unavailable: {}", err),
-        }
-    }
+    fn from(err: redis::RedisError) -> Self { Self { message: format!("redis nonce store unavailable: {}", err) } }
 }
 
 impl NonceStoreError {
-    fn timeout(operation: &str) -> Self {
-        Self {
-            message: format!("redis nonce store timed out during {operation}"),
-        }
-    }
+    fn timeout(operation: &str) -> Self { Self { message: format!("redis nonce store timed out during {operation}") } }
 }
 
 fn get_max_body_size() -> usize {
-    match std::env::var("MAX_REQUEST_BODY_BYTES") {
-        Ok(v) => match v.parse() {
-            Ok(size) if size > 0 => size,
-            Ok(_) => MAX_BODY_SIZE,
-            Err(_) => MAX_BODY_SIZE,
-        },
-        Err(_) => MAX_BODY_SIZE,
-    }
+    std::env::var("MAX_REQUEST_BODY_BYTES").ok().and_then(|v| v.parse().ok()).filter(|&s| s > 0).unwrap_or(MAX_BODY_SIZE)
 }
 
 fn memory_nonce_store() -> Arc<NonceStore> {
@@ -114,11 +91,7 @@ fn memory_nonce_store() -> Arc<NonceStore> {
 }
 
 fn normalize_redis_url(raw_url: &str) -> String {
-    if raw_url.starts_with("redis://") || raw_url.starts_with("rediss://") {
-        raw_url.to_string()
-    } else {
-        format!("redis://{raw_url}")
-    }
+    if raw_url.starts_with("redis://") || raw_url.starts_with("rediss://") { raw_url.to_string() } else { format!("redis://{raw_url}") }
 }
 
 fn redis_url_has_database(redis_url: &str) -> bool {
@@ -128,21 +101,15 @@ fn redis_url_has_database(redis_url: &str) -> bool {
     !without_scheme[path_start + 1..path_end].trim().is_empty()
 }
 
-fn get_non_empty_env(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|value| !value.trim().is_empty())
-}
+fn get_non_empty_env(key: &str) -> Option<String> { env::var(key).ok().filter(|value| !value.trim().is_empty()) }
 
 fn verifier_redis_connection_info(raw_url: &str) -> Result<redis::ConnectionInfo, redis::RedisError> {
     let redis_url = normalize_redis_url(raw_url);
     let has_database = redis_url_has_database(&redis_url);
     let mut connection_info: redis::ConnectionInfo = redis_url.as_str().parse()?;
-    if connection_info.redis.password.is_none() {
-        connection_info.redis.password = get_non_empty_env("REDIS_PASSWORD");
-    }
+    if connection_info.redis.password.is_none() { connection_info.redis.password = get_non_empty_env("REDIS_PASSWORD"); }
     if !has_database {
-        if let Some(db) = get_non_empty_env("REDIS_DB").and_then(|value| value.parse::<i64>().ok()) {
-            connection_info.redis.db = db;
-        }
+        if let Some(db) = get_non_empty_env("REDIS_DB").and_then(|value| value.parse::<i64>().ok()) { connection_info.redis.db = db; }
     }
     Ok(connection_info)
 }
@@ -173,19 +140,14 @@ fn build_nonce_store_from_env() -> Result<Arc<NonceStore>, String> {
 async fn main() {
     let limit = get_max_body_size();
     let nonce_store = build_nonce_store_from_env().expect("failed to configure nonce store");
-
     let mut supported_chains = SUPPORTED_CHAINS.to_vec();
-    
     for var in &["EXPECTED_CHAIN_ID", "CHAIN_ID"] {
         if let Ok(env_chain_str) = std::env::var(var) {
             if let Ok(parsed_env_id) = env_chain_str.parse::<u64>() {
-                if !supported_chains.contains(&parsed_env_id) {
-                    supported_chains.push(parsed_env_id);
-                }
+                if !supported_chains.contains(&parsed_env_id) { supported_chains.push(parsed_env_id); }
             }
         }
     }
-
     let state = AppState {
         max_body_size: limit,
         supported_chains,
@@ -193,17 +155,14 @@ async fn main() {
         signature_expiry_seconds: get_env_u64("SIGNATURE_EXPIRY_SECONDS", 300),
         clock_skew_seconds: get_env_u64("SIGNATURE_CLOCK_SKEW_SECONDS", 60),
     };
-    
     let recorder = PrometheusBuilder::new().install_recorder().expect("failed to install recorder");
     spawn_metrics_upkeep(recorder.clone());
-
     let app = Router::new()
         .route("/health", get(health))
         .route("/verify", post(verify_signature))
         .route("/metrics", get(metrics_route(recorder)))
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state);
-
     let addr = SocketAddr::from(([0, 0, 0, 0], 3002));
     println!("Rust Verifier listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind listener");
@@ -297,17 +256,20 @@ fn handle_rejection(err: JsonRejection, res_headers: HeaderMap) -> (StatusCode, 
         JsonRejection::BytesRejection(_) => (StatusCode::PAYLOAD_TOO_LARGE, "Payload too large", "payload_too_large"),
         _ => (StatusCode::BAD_REQUEST, "Invalid JSON payload", "invalid_payload"),
     };
+    metrics::record_verification(false, 0.0, Some(code));
     (status, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(msg.into()), error_code: Some(code.into()) }))
 }
 
 async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, payload: Result<Json<VerifyRequest>, JsonRejection>) -> (StatusCode, HeaderMap, Json<VerifyResponse>) {
-    let (cid, res_headers) = correlation_id_headers(&headers);
+    let start = Instant::now();
+    let (_, res_headers) = correlation_id_headers(&headers);
     let payload = match payload {
         Ok(Json(p)) => p,
         Err(e) => return handle_rejection(e, res_headers),
     };
 
     if !state.supported_chains.contains(&payload.context.chain_id) {
+        metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("chain_id_mismatch"));
         return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Unsupported chain".into()), error_code: Some("chain_id_mismatch".into()) }));
     }
 
@@ -317,33 +279,52 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
             VerifyError::FutureTimestamp => ("Timestamp in future", "timestamp_future"),
             VerifyError::MissingTimestamp => ("Timestamp missing", "timestamp_missing"),
         };
+        metrics::record_verification(false, start.elapsed().as_secs_f64(), Some(err_code));
         return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(err_msg.into()), error_code: Some(err_code.into()) }));
     }
 
-    let typed_data = serde_json::json!({
+    let typed_data_raw = serde_json::json!({
         "domain": { "name": "MicroAI Paygate", "version": "1", "chainId": payload.context.chain_id, "verifyingContract": "0x0000000000000000000000000000000000000000" },
         "types": { "Payment": [ { "name": "recipient", "type": "address" }, { "name": "token", "type": "string" }, { "name": "amount", "type": "string" }, { "name": "nonce", "type": "string" }, { "name": "timestamp", "type": "uint256" } ] },
         "primaryType": "Payment",
         "message": { "recipient": payload.context.recipient, "token": payload.context.token, "amount": payload.context.amount, "nonce": payload.context.nonce, "timestamp": payload.context.timestamp }
     });
 
-    let typed_data: TypedData = match serde_json::from_value(typed_data) {
+    let typed_data: TypedData = match serde_json::from_value(typed_data_raw) {
         Ok(data) => data,
-        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed typed data".into()), error_code: Some("malformed_typed_data".into()) })),
+        Err(_) => {
+            metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("malformed_typed_data"));
+            return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed typed data".into()), error_code: Some("malformed_typed_data".into()) }));
+        }
     };
 
     let sig = match Signature::from_str(&payload.signature) {
         Ok(signature) => signature,
-        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed signature".into()), error_code: Some("malformed_signature".into()) })),
+        Err(_) => {
+            metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("malformed_signature"));
+            return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed signature".into()), error_code: Some("malformed_signature".into()) }));
+        }
     };
     
     match sig.recover_typed_data(&typed_data) {
         Ok(addr) => match claim_nonce(&state, &payload.context.nonce, Instant::now()).await {
-            Ok(true) => (StatusCode::OK, res_headers, Json(VerifyResponse { is_valid: true, recovered_address: Some(format!("{:?}", addr)), error: None, error_code: None })),
-            Ok(false) => (StatusCode::CONFLICT, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce already used".into()), error_code: Some("nonce_already_used".into()) })),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce store failure".into()), error_code: Some("nonce_store_failure".into()) })),
+            Ok(true) => {
+                metrics::record_verification(true, start.elapsed().as_secs_f64(), None);
+                (StatusCode::OK, res_headers, Json(VerifyResponse { is_valid: true, recovered_address: Some(format!("{:?}", addr)), error: None, error_code: None }))
+            },
+            Ok(false) => {
+                metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("nonce_already_used"));
+                (StatusCode::CONFLICT, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce already used".into()), error_code: Some("nonce_already_used".into()) }))
+            },
+            Err(_) => {
+                metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("nonce_store_failure"));
+                (StatusCode::INTERNAL_SERVER_ERROR, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce store failure".into()), error_code: Some("nonce_store_failure".into()) }))
+            }
         },
-        Err(_) => (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid signature".into()), error_code: Some("invalid_signature".into()) })),
+        Err(_) => {
+            metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("invalid_signature"));
+            (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid signature".into()), error_code: Some("invalid_signature".into()) }))
+        }
     }
 }
 
@@ -351,9 +332,7 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
 mod tests {
     use super::*;
     use ethers::signers::{LocalWallet, Signer};
-
     fn app_state() -> AppState { AppState { max_body_size: MAX_BODY_SIZE, supported_chains: SUPPORTED_CHAINS.to_vec(), nonce_store: memory_nonce_store(), signature_expiry_seconds: 300, clock_skew_seconds: 60 } }
-
     async fn signed_req(nonce: &str, chain_id: u64) -> VerifyRequest {
         let wallet: LocalWallet = "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc".parse().unwrap();
         let wallet = wallet.with_chain_id(chain_id);
@@ -366,7 +345,6 @@ mod tests {
         let sig = wallet.sign_typed_data(&serde_json::from_value(typed).unwrap()).await.unwrap();
         VerifyRequest { context: PaymentContext { recipient: "0x1234567890123456789012345678901234567890".into(), token: "USDC".into(), amount: "100".into(), nonce: nonce.into(), chain_id, timestamp: Some(123456) }, signature: format!("0x{}", hex::encode(sig.to_vec())) }
     }
-
     #[tokio::test]
     async fn test_verify_signature_rejects_unsupported_chain_id() {
         let req = signed_req("n1", 999).await;
