@@ -71,8 +71,8 @@ func GenerateReceipt(payment PaymentContext, payer string, endpoint string, reqB
 			Recipient: payment.Recipient,
 			Amount:    payment.Amount,
 			Token:     payment.Token,
-			ChainID:   payment.ChainID,
-			ChainIDs:  SupportedChainIDs, // Inject multi-chain registry
+			ChainID:   int64(payment.ChainID), // Fixed: Explicit int64 type cast resolves compiler type mismatch
+			ChainIDs:  SupportedChainIDs,      // Inject multi-chain registry
 			Nonce:     payment.Nonce,
 		},
 		Service: ServiceDetails{
