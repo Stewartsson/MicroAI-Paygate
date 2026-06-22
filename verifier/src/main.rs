@@ -316,8 +316,35 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
         "message": { "recipient": payload.context.recipient, "token": payload.context.token, "amount": payload.context.amount, "nonce": payload.context.nonce, "timestamp": payload.context.timestamp }
     });
 
-    let typed_data: TypedData = serde_json::from_value(typed_data).unwrap();
-    let sig = Signature::from_str(&payload.signature).unwrap();
+       let typed_data: TypedData = match serde_json::from_value(typed_data) {
+        Ok(data) => data,
+        Err(_) => return (
+            StatusCode::BAD_REQUEST,
+            res_headers,
+            Json(VerifyResponse {
+                is_valid: false,
+                recovered_address: None,
+                error: Some("Malformed EIP-712 typed data parameter attributes configuration payload".into()),
+                error_code: Some("MALFORMED_TYPED_DATA".into()),
+            }),
+        ),
+    };
+
+        let sig = match Signature::from_str(&payload.signature) {
+        Ok(signature) => signature,
+        Err(_) => return (
+            StatusCode::BAD_REQUEST,
+            res_headers,
+            Json(VerifyResponse {
+                is_valid: false,
+                recovered_address: None,
+                error: Some("Malformed cryptographic signature string layout properties provided".into()),
+                error_code: Some("MALFORMED_SIGNATURE".into()),
+          
+            }),
+        ),
+    };
+
     
     match sig.recover_typed_data(&typed_data) {
         Ok(addr) => match claim_nonce(&state, &payload.context.nonce, Instant::now()).await {
