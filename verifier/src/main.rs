@@ -288,7 +288,7 @@ async fn claim_nonce(state: &AppState, nonce: &str, now: Instant) -> Result<bool
     let ttl = nonce_retention_ttl(state);
     match state.nonce_store.as_ref() {
         NonceStore::Memory(s) => claim_memory_nonce(s, nonce, now, ttl),
-        NonceStore::Redis(s) => claim_redis_nonce(s, ttl).await,
+        NonceStore::Redis(s) => claim_redis_nonce(s, nonce, ttl).await,
     }
 }
 
@@ -335,7 +335,7 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
             Ok(false) => (StatusCode::CONFLICT, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce already used".into()), error_code: Some("nonce_already_used".into()) })),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce store failure".into()), error_code: Some("nonce_store_failure".into()) })),
         },
-        Err(_) => (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid signature".into()), error_code: Some("bad_sig".into()) })),
+        Err(_) => (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid signature".into()), error_code: Some("invalid_signature".into()) })),
     }
 }
 
