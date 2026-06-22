@@ -206,8 +206,8 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3002));
     println!("Rust Verifier listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind listener");
+    axum::serve(listener, app).await.expect("Failed to start server");
 }
 
 fn metrics_route(handle: PrometheusHandle) -> impl Fn() -> std::future::Ready<String> + Clone + Send + Sync + 'static {
@@ -246,16 +246,16 @@ fn correlation_id_headers(headers: &HeaderMap) -> (String, HeaderMap) {
 }
 
 #[derive(Debug)]
-enum VerifyError { SignatureExpired { age_seconds: u64, max_seconds: u64 }, FutureTimestamp { timestamp: u64, now: u64 }, MissingTimestamp }
+enum VerifyError { SignatureExpired, FutureTimestamp, MissingTimestamp }
 
 fn get_env_u64(key: &str, default: u64) -> u64 { env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default) }
 
 fn validate_timestamp(timestamp: Option<u64>, window: u64, skew: u64) -> Result<(), VerifyError> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let ts = timestamp.ok_or(VerifyError::MissingTimestamp)?;
-    if ts > now.saturating_add(skew) { return Err(VerifyError::FutureTimestamp { timestamp: ts, now }); }
+    if ts > now.saturating_add(skew) { return Err(VerifyError::FutureTimestamp); }
     let age = now.saturating_sub(ts);
-    if age > window { return Err(VerifyError::SignatureExpired { age_seconds: age, max_seconds: window }); }
+    if age > window { return Err(VerifyError::SignatureExpired); }
     Ok(())
 }
 
@@ -270,11 +270,11 @@ fn maybe_evict(store: &MemoryNonceStore, now: Instant, ttl: Duration) {
 
 fn redis_nonce_key(prefix: &str, nonce: &str) -> String { format!("{}{}", prefix, hex::encode(keccak256(nonce.as_bytes()))) }
 
-fn claim_memory_nonce(store: &MemoryNonceStore, nonce: &str, now: Instant, ttl: Duration) -> bool {
+fn claim_memory_nonce(store: &MemoryNonceStore, nonce: &str, now: Instant, ttl: Duration) -> Result<bool, NonceStoreError> {
     maybe_evict(store, now, ttl);
     match store.used_nonces.entry(keccak256(nonce.as_bytes())) {
-        Entry::Occupied(mut entry) => { if now.saturating_duration_since(*entry.get()) > ttl { entry.insert(now); true } else { false } },
-        Entry::Vacant(entry) => { entry.insert(now); true }
+        Entry::Occupied(mut entry) => { if now.saturating_duration_since(*entry.get()) > ttl { entry.insert(now); Ok(true) } else { Ok(false) } },
+        Entry::Vacant(entry) => { entry.insert(now); Ok(true) }
     }
 }
 
@@ -287,26 +287,29 @@ async fn claim_redis_nonce(store: &RedisNonceStore, nonce: &str, ttl: Duration) 
 async fn claim_nonce(state: &AppState, nonce: &str, now: Instant) -> Result<bool, NonceStoreError> {
     let ttl = nonce_retention_ttl(state);
     match state.nonce_store.as_ref() {
-        NonceStore::Memory(s) => Ok(claim_memory_nonce(s, nonce, now, ttl)),
-        NonceStore::Redis(s) => claim_redis_nonce(s, nonce, ttl).await,
+        NonceStore::Memory(s) => claim_memory_nonce(s, nonce, now, ttl),
+        NonceStore::Redis(s) => claim_redis_nonce(s, ttl).await,
     }
 }
 
 async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, payload: Result<Json<VerifyRequest>, JsonRejection>) -> (StatusCode, HeaderMap, Json<VerifyResponse>) {
     let (cid, res_headers) = correlation_id_headers(&headers);
-    let start = Instant::now();
     let payload = match payload {
         Ok(Json(p)) => p,
-        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("invalid payload".into()), error_code: None })),
+        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid request body".into()), error_code: Some("invalid_payload".into()) })),
     };
 
     if !state.supported_chains.contains(&payload.context.chain_id) {
-        return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("unsupported chain".into()), error_code: Some("chain_id_mismatch".into()) }));
+        return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Unsupported chain".into()), error_code: Some("chain_id_mismatch".into()) }));
     }
 
     if let Err(err) = validate_timestamp(payload.context.timestamp, state.signature_expiry_seconds, state.clock_skew_seconds) {
-        // Refactored to 400 Bad Request and updated error_code to "invalid_timestamp"
-        return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(format!("{:?}", err)), error_code: Some("invalid_timestamp".into()) }));
+        let (err_msg, err_code) = match err {
+            VerifyError::SignatureExpired => ("Timestamp expired", "timestamp_expired"),
+            VerifyError::FutureTimestamp => ("Timestamp in future", "timestamp_future"),
+            VerifyError::MissingTimestamp => ("Timestamp missing", "timestamp_missing"),
+        };
+        return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some(err_msg.into()), error_code: Some(err_code.into()) }));
     }
 
     let typed_data = serde_json::json!({
@@ -316,46 +319,25 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
         "message": { "recipient": payload.context.recipient, "token": payload.context.token, "amount": payload.context.amount, "nonce": payload.context.nonce, "timestamp": payload.context.timestamp }
     });
 
-       let typed_data: TypedData = match serde_json::from_value(typed_data) {
+    let typed_data: TypedData = match serde_json::from_value(typed_data) {
         Ok(data) => data,
-        Err(_) => return (
-            StatusCode::BAD_REQUEST,
-            res_headers,
-            Json(VerifyResponse {
-                is_valid: false,
-                recovered_address: None,
-                error: Some("Malformed EIP-712 typed data parameter attributes configuration payload".into()),
-                error_code: Some("MALFORMED_TYPED_DATA".into()),
-            }),
-        ),
+        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed typed data".into()), error_code: Some("malformed_typed_data".into()) })),
     };
 
-        let sig = match Signature::from_str(&payload.signature) {
+    let sig = match Signature::from_str(&payload.signature) {
         Ok(signature) => signature,
-        Err(_) => return (
-            StatusCode::BAD_REQUEST,
-            res_headers,
-            Json(VerifyResponse {
-                is_valid: false,
-                recovered_address: None,
-                error: Some("Malformed cryptographic signature string layout properties provided".into()),
-                error_code: Some("MALFORMED_SIGNATURE".into()),
-          
-            }),
-        ),
+        Err(_) => return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed signature".into()), error_code: Some("malformed_signature".into()) })),
     };
-
     
     match sig.recover_typed_data(&typed_data) {
         Ok(addr) => match claim_nonce(&state, &payload.context.nonce, Instant::now()).await {
             Ok(true) => (StatusCode::OK, res_headers, Json(VerifyResponse { is_valid: true, recovered_address: Some(format!("{:?}", addr)), error: None, error_code: None })),
-            _ => (StatusCode::CONFLICT, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("nonce error".into()), error_code: Some("nonce_error".into()) })),
+            Ok(false) => (StatusCode::CONFLICT, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce already used".into()), error_code: Some("nonce_already_used".into()) })),
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce store failure".into()), error_code: Some("nonce_store_failure".into()) })),
         },
-        Err(_) => (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("bad sig".into()), error_code: Some("bad_sig".into()) })),
+        Err(_) => (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Invalid signature".into()), error_code: Some("bad_sig".into()) })),
     }
 }
-
-fn record_verification_failure(start: &Instant, reason: &'static str) { metrics::record_verification(false, start.elapsed().as_secs_f64(), Some(reason)); }
 
 #[cfg(test)]
 mod tests {
