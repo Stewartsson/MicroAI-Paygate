@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,39 @@ const (
 // SupportedChainIDs defines the network IDs allowed for payment requests.
 // 84532: Base Sepolia, 11155111: Ethereum Sepolia, 11155420: Optimism Sepolia.
 var SupportedChainIDs = []int64{84532, 11155111, 11155420}
+
+func init() {
+	// Sync dynamic environment chain IDs into the registry
+	envKeys := []string{"CHAIN_ID", "EXPECTED_CHAIN_ID"}
+	for _, key := range envKeys {
+		if val := os.Getenv(key); val != "" {
+			if id, err := strconv.ParseInt(val, 10, 64); err == nil {
+				found := false
+				for _, existing := range SupportedChainIDs {
+					if existing == id {
+						found = true
+						break
+					}
+				}
+				if !found {
+					SupportedChainIDs = append(SupportedChainIDs, id)
+					log.Printf("Dynamically registered chain ID %d from env var %s", id, key)
+				}
+			} else {
+				log.Printf("Warning: failed to parse %s=%s as int64", key, val)
+			}
+		}
+	}
+}
+
+func getEnvAsInt(key string, defaultValue int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultValue
+}
 
 func getAllowedOrigins() []string {
 	raw := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
@@ -76,6 +110,10 @@ func validateReceiptStoreMode() error {
 	}
 }
 
+func getCacheEnabled() bool {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("CACHE_ENABLED"))) != "false"
+}
+
 func isRedisRequired() bool {
 	return getCacheEnabled() || getReceiptStoreMode() == receiptStoreModeRedis
 }
@@ -91,9 +129,9 @@ func getPositiveTimeout(envKey string, defaultSeconds int) time.Duration {
 }
 
 // Timeout helpers (configurable via env vars)
-func getRequestTimeout() time.Duration { return getPositiveTimeout("REQUEST_TIMEOUT_SECONDS", 60) }
-func getAITimeout() time.Duration       { return getPositiveTimeout("AI_REQUEST_TIMEOUT_SECONDS", 30) }
-func getVerifierTimeout() time.Duration { return getPositiveTimeout("VERIFIER_TIMEOUT_SECONDS", 2) }
+func getRequestTimeout() time.Duration    { return getPositiveTimeout("REQUEST_TIMEOUT_SECONDS", 60) }
+func getAITimeout() time.Duration         { return getPositiveTimeout("AI_REQUEST_TIMEOUT_SECONDS", 30) }
+func getVerifierTimeout() time.Duration   { return getPositiveTimeout("VERIFIER_TIMEOUT_SECONDS", 2) }
 func getHealthCheckTimeout() time.Duration {
 	return getPositiveTimeout("HEALTH_CHECK_TIMEOUT_SECONDS", 2)
 }
