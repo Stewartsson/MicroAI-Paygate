@@ -19,7 +19,7 @@ use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_BODY_SIZE: usize = 1024 * 1024; // 1MB
 const DEFAULT_EXPECTED_CHAIN_ID: u64 = 84532;
 const NONCE_SWEEP_INTERVAL_SECONDS: u64 = 60;
+const DEFAULT_PORT: u16 = 3002;
+const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
 
 #[derive(Clone)]
 struct AppState {
@@ -147,6 +149,42 @@ fn get_expected_chain_id() -> u64 {
     }
 
     parse_chain_id_env("CHAIN_ID").unwrap_or(DEFAULT_EXPECTED_CHAIN_ID)
+}
+
+fn get_port() -> u16 {
+    match std::env::var("PORT") {
+        Ok(v) => match v.parse::<u16>() {
+            Ok(port) if port > 0 => port,
+            Ok(_) => {
+                eprintln!("Warning: PORT must be > 0, using default {}", DEFAULT_PORT);
+                DEFAULT_PORT
+            }
+            Err(_) => {
+                eprintln!(
+                    "Warning: Invalid PORT '{}', using default {}",
+                    v, DEFAULT_PORT
+                );
+                DEFAULT_PORT
+            }
+        },
+        Err(_) => DEFAULT_PORT,
+    }
+}
+
+fn get_bind_address() -> IpAddr {
+    match std::env::var("BIND_ADDRESS") {
+        Ok(v) => match v.parse::<IpAddr>() {
+            Ok(addr) => addr,
+            Err(_) => {
+                eprintln!(
+                    "Warning: Invalid BIND_ADDRESS '{}', using default {}",
+                    v, DEFAULT_BIND_ADDRESS
+                );
+                DEFAULT_BIND_ADDRESS.parse().unwrap()
+            }
+        },
+        Err(_) => DEFAULT_BIND_ADDRESS.parse().unwrap(),
+    }
 }
 
 fn memory_nonce_store() -> Arc<NonceStore> {
@@ -275,7 +313,7 @@ async fn main() {
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3002));
+    let addr = SocketAddr::new(get_bind_address(), get_port());
     println!("Rust Verifier listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -872,6 +910,24 @@ mod tests {
         }
     }
 
+    fn with_port_env(port: Option<&str>, test: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let old_port = env::var("PORT").ok();
+
+        match port {
+            Some(value) => env::set_var("PORT", value),
+            None => env::remove_var("PORT"),
+        }
+
+        test();
+
+        match old_port {
+            Some(value) => env::set_var("PORT", value),
+            None => env::remove_var("PORT"),
+        }
+    }
+
     fn with_redis_auth_env(
         redis_password: Option<&str>,
         redis_db: Option<&str>,
@@ -1115,6 +1171,72 @@ mod tests {
         // One second past boundary (301s) - should be expired
         let res = validate_timestamp_internal(Some(n - 301), 300, 60, n);
         assert!(matches!(res, Err(VerifyError::SignatureExpired { .. })));
+    }
+
+    #[test]
+    fn test_get_port_defaults_when_unset() {
+        with_port_env(None, || {
+            assert_eq!(get_port(), DEFAULT_PORT);
+        });
+    }
+
+    #[test]
+    fn test_get_port_reads_valid_port() {
+        with_port_env(Some("4000"), || {
+            assert_eq!(get_port(), 4000);
+        });
+    }
+
+    #[test]
+    fn test_get_port_falls_back_on_invalid_value() {
+        with_port_env(Some("abc"), || {
+            assert_eq!(get_port(), DEFAULT_PORT);
+        });
+    }
+
+    #[test]
+    fn test_get_bind_address_defaults_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let old = env::var("BIND_ADDRESS").ok();
+        env::remove_var("BIND_ADDRESS");
+
+        assert_eq!(get_bind_address().to_string(), "0.0.0.0");
+
+        match old {
+            Some(v) => env::set_var("BIND_ADDRESS", v),
+            None => env::remove_var("BIND_ADDRESS"),
+        }
+    }
+
+    #[test]
+    fn test_get_bind_address_reads_valid_address() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let old = env::var("BIND_ADDRESS").ok();
+        env::set_var("BIND_ADDRESS", "127.0.0.1");
+
+        assert_eq!(get_bind_address().to_string(), "127.0.0.1");
+
+        match old {
+            Some(v) => env::set_var("BIND_ADDRESS", v),
+            None => env::remove_var("BIND_ADDRESS"),
+        }
+    }
+
+    #[test]
+    fn test_get_bind_address_falls_back_on_invalid_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let old = env::var("BIND_ADDRESS").ok();
+        env::set_var("BIND_ADDRESS", "not-an-ip");
+
+        assert_eq!(get_bind_address().to_string(), "0.0.0.0");
+
+        match old {
+            Some(v) => env::set_var("BIND_ADDRESS", v),
+            None => env::remove_var("BIND_ADDRESS"),
+        }
     }
 
     #[tokio::test]
