@@ -344,8 +344,8 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
     let sig = match Signature::from_str(&payload.signature) {
         Ok(signature) => signature,
         Err(_) => {
-            metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("malformed_signature"));
-            return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed signature".into()), error_code: Some("malformed_signature".into()) }));
+            metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("invalid_signature"));
+            return (StatusCode::BAD_REQUEST, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Malformed signature".into()), error_code: Some("invalid_signature".into()) }));
         }
     };
     
