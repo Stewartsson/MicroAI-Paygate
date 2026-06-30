@@ -360,8 +360,8 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
                 (StatusCode::CONFLICT, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce already used".into()), error_code: Some("nonce_already_used".into()) }))
             },
             Err(_) => {
-                metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("nonce_store_failure"));
-                (StatusCode::INTERNAL_SERVER_ERROR, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce store failure".into()), error_code: Some("nonce_store_failure".into()) }))
+                metrics::record_verification(false, start.elapsed().as_secs_f64(), Some("nonce_store_unavailable"));
+                (StatusCode::SERVICE_UNAVAILABLE, res_headers, Json(VerifyResponse { is_valid: false, recovered_address: None, error: Some("Nonce store unavailable".into()), error_code: Some("nonce_store_unavailable".into()) }))
             }
         },
         Err(_) => {
