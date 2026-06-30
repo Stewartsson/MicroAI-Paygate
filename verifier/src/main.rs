@@ -372,6 +372,20 @@ async fn verify_signature(State(state): State<AppState>, headers: HeaderMap, pay
 }
 
 #[cfg(test)]
+async fn signed_req(nonce: &str, chain_id: u64) -> VerifyRequest {
+    use ethers::signers::{LocalWallet, Signer};
+    let wallet: LocalWallet = "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc".parse().unwrap();
+    let typed = serde_json::json!({
+        "domain": { "name": "MicroAI Paygate", "version": "1", "chainId": chain_id, "verifyingContract": "0x0000000000000000000000000000000000000000" },
+        "types": { "Payment": [ { "name": "recipient", "type": "address" }, { "name": "token", "type": "string" }, { "name": "amount", "type": "string" }, { "name": "nonce", "type": "string" }, { "name": "timestamp", "type": "uint256" } ] },
+        "primaryType": "Payment",
+        "message": { "recipient": "0x1234567890123456789012345678901234567890", "token": "USDC", "amount": "100", "nonce": nonce, "timestamp": 123456 }
+    });
+    let sig = wallet.sign_typed_data(&serde_json::from_value(typed).unwrap()).await.unwrap();
+    VerifyRequest { context: PaymentContext { recipient: "0x1234567890123456789012345678901234567890".into(), token: "USDC".into(), amount: "100".into(), nonce: nonce.into(), chain_id, timestamp: Some(123456) }, signature: format!("0x{}", hex::encode(sig.to_vec())) }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ethers::signers::{LocalWallet, Signer};
@@ -829,7 +843,7 @@ mod tests {
                 timestamp: Some(ts),
             },
             signature: format!("0x{}", hex::encode(sig.to_vec())),
-        };
+        }
 
         let (status, _, Json(resp)) =
             verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
@@ -1124,21 +1138,9 @@ mod tests {
         );
     }
 
-    async fn signed_req(nonce: &str, chain_id: u64) -> VerifyRequest {
-        let wallet: LocalWallet = "380eb0f3d505f087e438eca80bc4df9a7faa24f868e69fc0440261a0fc0567dc".parse().unwrap();
-        let typed = serde_json::json!({
-            "domain": { "name": "MicroAI Paygate", "version": "1", "chainId": chain_id, "verifyingContract": "0x0000000000000000000000000000000000000000" },
-            "types": { "Payment": [ { "name": "recipient", "type": "address" }, { "name": "token", "type": "string" }, { "name": "amount", "type": "string" }, { "name": "nonce", "type": "string" }, { "name": "timestamp", "type": "uint256" } ] },
-            "primaryType": "Payment",
-            "message": { "recipient": "0x1234567890123456789012345678901234567890", "token": "USDC", "amount": "100", "nonce": nonce, "timestamp": 123456 }
-        });
-        let sig = wallet.sign_typed_data(&serde_json::from_value(typed).unwrap()).await.unwrap();
-        VerifyRequest { context: PaymentContext { recipient: "0x1234567890123456789012345678901234567890".into(), token: "USDC".into(), amount: "100".into(), nonce: nonce.into(), chain_id, timestamp: Some(123456) }, signature: format!("0x{}", hex::encode(sig.to_vec())) }
-    }
-
     #[tokio::test]
     async fn test_verify_signature_rejects_unsupported_chain_id() {
-        let req = signed_req("n1", 999).await;
+        let req = super::signed_req("n1", 999).await;
         let (status, _, Json(resp)) = verify_signature(State(app_state()), HeaderMap::new(), Ok(Json(req))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(resp.error_code, Some("chain_id_mismatch".into()));
