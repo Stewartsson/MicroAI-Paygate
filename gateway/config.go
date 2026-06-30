@@ -17,25 +17,23 @@ const (
 	receiptStoreModeMemory = "memory"
 )
 
-// SupportedChainIDs defines the network IDs allowed for payment requests.
-// 84532: Base Sepolia, 11155111: Ethereum Sepolia, 11155420: Optimism Sepolia.
-var SupportedChainIDs = []int64{84532, 11155111, 11155420}
-
-func init() {
-	// Sync dynamic environment chain IDs into the registry
+// GetSupportedChainIds defines the network IDs allowed for payment requests.
+// 84532: Base Sepolia, 11155111: Ethereum Sepolia, 11155240: Optimism Sepolia.
+func GetSupportedChainIds() []int64 {
+	chainIDs := []int64{84532, 11155111, 11155240}
 	envKeys := []string{"CHAIN_ID", "EXPECTED_CHAIN_ID"}
 	for _, key := range envKeys {
 		if val := os.Getenv(key); val != "" {
 			if id, err := strconv.ParseInt(val, 10, 64); err == nil {
 				found := false
-				for _, existing := range SupportedChainIDs {
+				for _, existing := range chainIDs {
 					if existing == id {
 						found = true
 						break
 					}
 				}
 				if !found {
-					SupportedChainIDs = append(SupportedChainIDs, id)
+					chainIDs = append(chainIDs, id)
 					log.Printf("Dynamically registered chain ID %d from env var %s", id, key)
 				}
 			} else {
@@ -43,6 +41,7 @@ func init() {
 			}
 		}
 	}
+	return chainIDs
 }
 
 func getAllowedOrigins() []string {
