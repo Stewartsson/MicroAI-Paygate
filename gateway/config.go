@@ -45,15 +45,6 @@ func init() {
 	}
 }
 
-func getEnvAsInt(key string, defaultValue int) int {
-	if val := os.Getenv(key); val != "" {
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
-	}
-	return defaultValue
-}
-
 func getAllowedOrigins() []string {
 	raw := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
 	if raw == "" {
@@ -110,10 +101,6 @@ func validateReceiptStoreMode() error {
 	}
 }
 
-func getCacheEnabled() bool {
-	return strings.ToLower(strings.TrimSpace(os.Getenv("CACHE_ENABLED"))) != "false"
-}
-
 func isRedisRequired() bool {
 	return getCacheEnabled() || getReceiptStoreMode() == receiptStoreModeRedis
 }
@@ -135,3 +122,4 @@ func getVerifierTimeout() time.Duration   { return getPositiveTimeout("VERIFIER_
 func getHealthCheckTimeout() time.Duration {
 	return getPositiveTimeout("HEALTH_CHECK_TIMEOUT_SECONDS", 2)
 }
+
