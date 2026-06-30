@@ -352,7 +352,7 @@ components:
 
     PaymentContext:
       type: object
-      required: [recipient, token, amount, nonce, chainId, supportedChainIds, timestamp]
+      required: [recipient, token, amount, nonce, chainId, timestamp]
       properties:
         recipient:
           type: string
@@ -501,3 +501,5 @@ components:
             response_hash:
               type: string
               example: sha256:...
+
+              
